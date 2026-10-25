@@ -35,7 +35,23 @@ function append(file: string, entry: unknown): void {
 
 // ---------- redaction ----------
 
-const SECRET_KEY = /^(authorization|x-api-key|api[-_]?key|apikey|key|token|bot_token|secret|webhook_secret|password|cvc|cvv|code_verifier|access_token|refresh_token|client_secret)$/i;
+const SECRET_KEY =
+  /^(authorization|x-api-key|api[-_]?key|apikey|key|token|bot_token|secret|webhook_secret|password|cvc|cvv|code_verifier|access_token|refresh_token|client_secret|id_token|private[-_]token|x-figma-token|xi-api-key|x-goog-api-key|x-shopify-access-token|x-amz-security-token|accessjwt|refreshjwt|assertion|private_key|secret_access_key|app_password)$/i;
+
+/** Provider token formats, so a key pasted into any text (a URL, an error, a task) never reaches a log. */
+const TOKEN_PATTERNS: [RegExp, string][] = [
+  [/\b(gh[pousr]_)[A-Za-z0-9]{20,}/g, '$1<redacted>'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_<redacted>'],
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, 'glpat-<redacted>'],
+  [/\bhf_[A-Za-z0-9]{20,}/g, 'hf_<redacted>'],
+  [/\bnpm_[A-Za-z0-9]{30,}/g, 'npm_<redacted>'],
+  [/\bpypi-[A-Za-z0-9_-]{40,}/g, 'pypi-<redacted>'],
+  [/\b(xox[abprs]-)[A-Za-z0-9-]{10,}/g, '$1<redacted>'],
+  [/\b((?:sk|rk)_(?:live|test)_)[A-Za-z0-9]{10,}/g, '$1<redacted>'],
+  [/\bAIza[0-9A-Za-z_-]{35}/g, 'AIza<redacted>'],
+  [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, '$1<redacted>'],
+  [/\b(sbp_|dckr_pat_|lin_api_|ntn_|figd_|shp(?:at|ca|pa|ss)_)[A-Za-z0-9_-]{16,}/g, '$1<redacted>'],
+];
 
 function luhn(digits: string): boolean {
   let sum = 0;
@@ -53,7 +69,12 @@ function luhn(digits: string): boolean {
 }
 
 export function redactString(s: string): string {
-  return s
+  let out = s
+    // PEM private keys (service-account JSON, SSH keys); an unterminated block is cut to the end.
+    .replace(/-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----[\s\S]*?-----END \1PRIVATE KEY-----/g, '-----BEGIN $1PRIVATE KEY-----<redacted>-----END $1PRIVATE KEY-----')
+    .replace(/-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----(?!<redacted>)[\s\S]*/g, '-----BEGIN $1PRIVATE KEY-----<redacted>');
+  for (const [re, to] of TOKEN_PATTERNS) out = out.replace(re, to);
+  return out
     .replace(/bot\d{5,}:[A-Za-z0-9_-]{20,}/g, 'bot<redacted>')
     .replace(/\b(sk-(?:or-v1-|ant-)?[A-Za-z0-9_-]{8})[A-Za-z0-9_-]{8,}/g, '$1…<redacted>')
     .replace(/\b(am_|ap_|agentmail_|agentphone_)[A-Za-z0-9_-]{12,}/g, '$1<redacted>')

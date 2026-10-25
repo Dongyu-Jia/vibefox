@@ -57,6 +57,8 @@ export interface BodyPaths {
   keys: string;
   secretsFile: string;
   daemonJson: string;
+  /** What the agent owns or can use (accounts, tokens, projects…); never the secret values. */
+  resources: string;
 }
 
 export function bodyPaths(root: string): BodyPaths {
@@ -82,6 +84,7 @@ export function bodyPaths(root: string): BodyPaths {
     keys: path.join(root, 'keys'),
     secretsFile: path.join(root, 'secrets.json'),
     daemonJson: path.join(root, 'daemon.json'),
+    resources: path.join(root, 'resources.json'),
   };
 }
 
