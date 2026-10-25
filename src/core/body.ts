@@ -17,11 +17,26 @@ export interface IdentityRecord {
   note?: string;
 }
 
+/**
+ * The parent's legal identity, given once with consent, for the things only a
+ * real person can be on record for (a domain registrant, a Stripe account).
+ */
+export interface LegalProfile {
+  fullName: string;
+  company?: string;
+  email: string;
+  phone: string;
+  address: { line1: string; line2?: string; city: string; state?: string; postalCode: string; country: string };
+  /** When the parent agreed that the agent may use this on their behalf. */
+  consentAt: string;
+}
+
 export interface ParentInfo {
   name: string;
   telegram?: { userId: number; chatId: number; username?: string };
   email?: string;
   phone?: string;
+  legal?: LegalProfile;
 }
 
 export interface AgentIdentity {
@@ -47,6 +62,10 @@ export interface Mandate {
   parentStatement: string;
   signedAt: string;
   signedBy: string;
+  /** 1 for the first mandate; each re-signing adds one. Mandates from before revisions have none (= 1). */
+  revision?: number;
+  /** Hash of the mandate this one replaced, so the history is a chain. */
+  previousHash?: string;
   /** sha256 of the canonical mandate body, signed with the agent's own ed25519 key. */
   hash?: string;
   agentSignature?: string;

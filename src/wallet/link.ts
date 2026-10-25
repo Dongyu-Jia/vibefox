@@ -13,8 +13,18 @@ import { redact, writeApiLog } from '../core/log.ts';
 export interface LinkResult<T = Record<string, unknown>> {
   code: number;
   data: T;
+  /** Everything link-cli printed, parsed (a list when the command yields several objects). */
+  parsed: unknown;
   stdout: string;
   stderr: string;
+}
+
+export interface LoginStart {
+  /** Link already trusts this Mac; nothing for the parent to approve. */
+  already: boolean;
+  verificationUrl?: string;
+  /** The words the parent checks in the Link app before approving. */
+  phrase?: string;
 }
 
 export function defaultLinkCli(): string {
@@ -37,6 +47,49 @@ function unwrap<T>(parsed: unknown): T {
   // link-cli emits either one object or a list of yielded objects; the last one is the final state.
   if (Array.isArray(parsed)) return (parsed[parsed.length - 1] ?? {}) as T;
   return parsed as T;
+}
+
+/** JSON from link-cli's stdout, even when a notice or warning line got printed before it. */
+export function parseLinkOutput(stdout: string): unknown {
+  const text = stdout.trim();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {}
+  // The trailing lines that parse on their own are the JSON document (or the last JSONL record).
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i > 0; i--) {
+    try {
+      return JSON.parse(lines.slice(i).join('\n'));
+    } catch {}
+  }
+  return { raw: text };
+}
+
+/** First string value under one of `keys`, searching nested objects and lists (link-cli's shapes vary by version and format). */
+function findString(value: unknown, keys: string[], depth = 0): string | undefined {
+  if (depth > 4 || value == null || typeof value !== 'object') return undefined;
+  const items = Array.isArray(value) ? [...value].reverse() : [value];
+  for (const item of items) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      for (const k of keys) {
+        const v = (item as Record<string, unknown>)[k];
+        if (typeof v === 'string' && v.trim()) return v.trim();
+      }
+    }
+  }
+  for (const item of items) {
+    const children = item && typeof item === 'object' ? Object.values(item as Record<string, unknown>) : [];
+    for (const child of children) {
+      const found = findString(child, keys, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+function errorText(r: LinkResult<unknown>): string {
+  return findString(r.parsed, ['message']) ?? (r.stderr.trim() || r.stdout.trim() || `exit ${r.code}`);
 }
 
 export class LinkWallet {
@@ -66,12 +119,7 @@ export class LinkWallet {
       });
       child.on('close', (code) => {
         clearTimeout(timer);
-        let parsed: unknown = {};
-        try {
-          parsed = stdout.trim() ? JSON.parse(stdout) : {};
-        } catch {
-          parsed = { raw: stdout.trim() };
-        }
+        const parsed = parseLinkOutput(stdout);
         const data = unwrap<T>(parsed);
         writeApiLog({
           ts: new Date(started).toISOString(),
@@ -82,7 +130,7 @@ export class LinkWallet {
           response: { status: code, body: redact(parsed), stderr: stderr.trim().slice(0, 2000) || undefined },
           durationMs: Date.now() - started,
         });
-        resolve({ code: code ?? 1, data, stdout, stderr });
+        resolve({ code: code ?? 1, data, parsed, stdout, stderr });
       });
     });
   }
@@ -92,7 +140,28 @@ export class LinkWallet {
     return { ...r.data, authenticated: Boolean(r.data?.authenticated) };
   }
 
-  /** Starts the device flow; the parent approves in the Link app. Streams status lines to `onLine`. */
+  /**
+   * Starts the device flow and returns at once (`--interval 0`): the parent opens
+   * the URL or the Link app, checks the phrase and approves. `authStatus()` then
+   * completes the pending login; link-cli keeps it in its own credential store.
+   */
+  async loginStart(clientName: string): Promise<LoginStart> {
+    const r = await this.run(['auth', 'login', '--client-name', clientName, '--interval', '0'], 60_000);
+    const authenticated = r.code === 0 && (Array.isArray(r.parsed) ? r.parsed : [r.parsed]).some((o) => (o as { authenticated?: unknown } | null)?.authenticated === true);
+    if (authenticated) return { already: true };
+    const url = findString(r.parsed, ['verification_url', 'verification_url_complete', 'verificationUrl', 'verification_uri_complete']);
+    const phrase = findString(r.parsed, ['phrase', 'user_code', 'userCode']);
+    // The page shows this as a link, so only ever an https URL.
+    if (r.code !== 0 || !url || !/^https:\/\//i.test(url)) throw new Error(`link-cli auth login failed: ${errorText(r)}`.slice(0, 800));
+    return { already: false, verificationUrl: url, phrase };
+  }
+
+  async logout(): Promise<void> {
+    const r = await this.run(['auth', 'logout']);
+    if (r.code !== 0) throw new Error(`link-cli auth logout failed: ${errorText(r)}`.slice(0, 800));
+  }
+
+  /** Terminal wizard: starts the device flow and waits for approval. Streams status lines to `onLine`. */
   login(clientName: string, onLine: (line: string) => void): Promise<number> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.bin, ['auth', 'login', '--client-name', clientName, '--interval', '5', '--timeout', '600'], {

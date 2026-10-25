@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Body, Mandate } from '../core/body.ts';
-import { sign } from '../identity/selfmade.ts';
+import { sign, verify } from '../identity/selfmade.ts';
 
 /** Categories a parent can forbid forever. These are the classic scam cash-out routes. */
 export const CATEGORY_PATTERNS: Record<string, RegExp> = {
@@ -9,6 +11,12 @@ export const CATEGORY_PATTERNS: Record<string, RegExp> = {
   crypto: /\b(crypto|bitcoin|btc|ethereum|usdt|usdc|coinbase|binance|kraken)\b|加密货币|比特币/i,
   gambling: /\b(casino|betting|gambl\w*|lottery|poker|sportsbook)\b|赌|彩票/i,
 };
+
+/** Forbidden in every mandate; the parent cannot switch these on. */
+export const BLOCKED_CATEGORIES = ['gift_cards', 'money_transfer', 'crypto', 'gambling'] as const;
+
+/** What a parent can allow, in the order the wizard and the UI ask. */
+export const SPEND_CATEGORIES = ['compute', 'software', 'food', 'shopping', 'travel'] as const;
 
 export const CATEGORY_LABELS: Record<string, string> = {
   gift_cards: '礼品卡',
@@ -71,6 +79,8 @@ export function createMandate(body: Body, input: {
   blockedCategories: string[];
   parentName: string;
   currency?: string;
+  revision?: number;
+  previousHash?: string;
 }): Mandate {
   const name = body.identity().name;
   const m: Mandate = {
@@ -85,6 +95,9 @@ export function createMandate(body: Body, input: {
     signedAt: new Date().toISOString(),
     signedBy: input.parentName,
   };
+  // Only set when given: a mandate without these keys hashes exactly like the ones signed before revisions existed.
+  if (input.revision != null) m.revision = input.revision;
+  if (input.previousHash) m.previousHash = input.previousHash;
   m.hash = crypto.createHash('sha256').update(canonical(m)).digest('hex');
   m.agentSignature = sign(body, m.hash);
   return m;
@@ -92,4 +105,42 @@ export function createMandate(body: Body, input: {
 
 export function mandateIntact(m: Mandate): boolean {
   return m.hash === crypto.createHash('sha256').update(canonical(m)).digest('hex');
+}
+
+/** Hash intact and signed by this agent's own key. */
+export function mandateSigned(body: Body, m: Mandate): boolean {
+  if (!mandateIntact(m) || !m.hash || !m.agentSignature) return false;
+  try {
+    return verify(body, m.hash, m.agentSignature);
+  } catch {
+    return false;
+  }
+}
+
+export function mandateRevision(m: Mandate): number {
+  return m.revision ?? 1;
+}
+
+/** Every mandate the parent signed before the current one: `<body>/mandate-history/<revision>.json`. */
+export function mandateHistoryDir(body: Body): string {
+  return path.join(body.root, 'mandate-history');
+}
+
+export function archiveMandate(body: Body, m: Mandate): string {
+  const dir = mandateHistoryDir(body);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${mandateRevision(m)}.json`);
+  fs.writeFileSync(file, JSON.stringify(m, null, 2) + '\n');
+  return file;
+}
+
+/** Oldest first. */
+export function mandateHistory(body: Body): Mandate[] {
+  const dir = mandateHistoryDir(body);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => /^\d+\.json$/.test(f))
+    .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as Mandate)
+    .sort((a, b) => mandateRevision(a) - mandateRevision(b));
 }

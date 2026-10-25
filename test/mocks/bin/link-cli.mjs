@@ -11,12 +11,39 @@ const fail = (msg) => { process.stdout.write(JSON.stringify({ error: { code: 'IN
 const s = load();
 s.calls.push(args.filter((a) => a !== '--format' && a !== 'json'));
 const [a, b, c] = args;
-if (a === 'auth' && b === 'status') { save(s); out({ authenticated: s.authenticated, credentials_path: stateFile }); }
-else if (a === 'auth' && b === 'login') {
-  console.log('Open https://app.link.com/device and confirm the phrase: brave-otter-42');
-  console.log('Waiting for approval in the Link app…');
-  s.authenticated = true; save(s); console.log(JSON.stringify({ authenticated: true }));
+// Device login, like the real CLI: `auth login` leaves a pending login in the credential store,
+// `auth status` completes it once the parent "approved" (after VF_MOCK_LINK_APPROVE_AFTER status
+// polls, default 1; `never` keeps it pending), `auth logout` clears everything.
+const approveAfter = Number(process.env.VF_MOCK_LINK_APPROVE_AFTER ?? 1);
+const authed = () => ({ authenticated: true, access_token: 'liwlat_mock_00000000...', token_type: 'Bearer', credentials_path: stateFile });
+const pendingView = () => (s.pending ? { pending: true, verification_url: s.pending.verification_url, phrase: s.pending.phrase } : {});
+if (a === 'auth' && b === 'status') {
+  if (!s.authenticated && s.pending) {
+    s.pending.polls = (s.pending.polls ?? 0) + 1;
+    if (s.pending.polls >= approveAfter) { s.authenticated = true; delete s.pending; }
+  }
+  save(s);
+  out(s.authenticated ? authed() : { authenticated: false, credentials_path: stateFile, ...pendingView() });
 }
+else if (a === 'auth' && b === 'login') {
+  if (s.authenticated) { save(s); out({ authenticated: true, message: 'You are already logged in. To switch accounts, run `link-cli auth logout` first.' }); }
+  else {
+    s.logins = (s.logins ?? 0) + 1;
+    s.pending = { verification_url: `https://app.link.com/device/approve?code=MOCK${String(s.logins).padStart(4, '0')}`, phrase: 'brave-otter-42', client_name: flag('client-name'), polls: 0 };
+    if (Number(flag('interval') ?? 0) <= 0) {
+      save(s);
+      out({ verification_url: s.pending.verification_url, phrase: s.pending.phrase, instruction: 'Present the verification_url to the user and ask them to approve in the Link app. Then call `auth status --interval 5 --max-attempts 60` to poll until authenticated. Do not wait for the user to reply — start polling immediately.', _next: { command: 'auth status --interval 5 --max-attempts 60', poll_interval_seconds: 5, until: 'authenticated is true' } });
+    } else {
+      // Polling login (the terminal wizard, no --format): status lines as the real CLI prints them, then approved.
+      console.log(`verification_url: ${s.pending.verification_url}`);
+      console.log(`phrase: ${s.pending.phrase}`);
+      console.log('instruction: Present the verification_url to the user and ask them to approve in the Link app. Polling has started automatically — no further action needed.');
+      s.authenticated = true; delete s.pending; save(s);
+      console.log('authenticated: true');
+    }
+  }
+}
+else if (a === 'auth' && b === 'logout') { s.authenticated = false; delete s.pending; save(s); process.stdout.write(JSON.stringify({ authenticated: false }) + '\n'); }
 else if (a === 'user-info') { save(s); out({ email: 'parent@example.com', agent_wallet_spend_limits: { per_transaction: { limit: 50000, used: 0, remaining: 50000 }, daily: { limit: 50000, used: 0, remaining: 50000 }, thirty_day: { limit: 2000000, used: 0, remaining: 2000000 } }, agent_wallet_verification_requirement: { status: 'none', action_url: null } }); }
 else if (a === 'spend-request' && b === 'create') {
   if (!s.authenticated) fail('Not authenticated. Run link-cli auth login');
