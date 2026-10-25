@@ -1,29 +1,27 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
-import { TelegramChannel } from '../channels/telegram.ts';
-import { Body, defaultConfig, defaultRouting, defaultSoul, SOUL_PRESETS, type AgentConfig, type WorkerSpec } from '../core/body.ts';
-import { configureLogs, loggedFetch } from '../core/log.ts';
-import { agentsDir, setCurrentAgent, slugify, currentAgentSlug } from '../core/paths.ts';
+import { Body, SOUL_PRESETS, type AgentConfig, type Mandate, type WorkerSpec } from '../core/body.ts';
+import { configureLogs } from '../core/log.ts';
+import { currentAgentSlug } from '../core/paths.ts';
 import { openSecrets, type SecretStore } from '../core/secrets.ts';
-import { AgentMail } from '../identity/agentmail.ts';
-import { AgentPhone } from '../identity/agentphone.ts';
 import { IDENTITY_KINDS, OPENER_LABEL } from '../identity/registry.ts';
-import { openSelfIdentities } from '../identity/selfmade.ts';
-import { resolveModel, type Provider } from '../llm/index.ts';
+import type { Provider } from '../llm/index.ts';
 import { LinkWallet } from '../wallet/link.ts';
-import { CATEGORY_LABELS, createMandate, fmtCents } from '../wallet/mandate.ts';
+import { BLOCKED_CATEGORIES, CATEGORY_LABELS, fmtCents, SPEND_CATEGORIES } from '../wallet/mandate.ts';
 import { detectHarnesses, importOpencodeKey } from './detect.ts';
 import { install, STAY_AWAKE_ADVICE } from './launchd.ts';
 import { openRouterLogin } from './openrouterOAuth.ts';
 import { color as C, type Prompter } from './prompter.ts';
+import { birthAgent, connectBrain, connectTelegram, consentGiven, emailOptions, openEmail, openPhone, phoneOptions, setParent, signMandate, StepError, TIER_CANDIDATES, walletCheck } from './steps.ts';
 import { setupKeys, tail } from '../cli/keys.ts';
+
+export { testModel } from './steps.ts';
 
 /**
  * `vf init`: the agent's birth. Each step unlocks one level; every step can be
  * re-run alone (`vf init --step email`). This is the one moment the parent
  * grants permissions — afterwards the agent doesn't ask again.
+ * The questions live here; what each step does lives in steps.ts, shared with the local UI.
  */
 
 export const STEPS = ['birth', 'brain', 'workers', 'channel', 'email', 'phone', 'money', 'parent', 'install'] as const;
@@ -43,12 +41,6 @@ interface Ctx {
   secrets: SecretStore;
   opts: WizardOptions;
 }
-
-const TIER_CANDIDATES: Record<Provider, { cheap: string; mid: string; strong: string }> = {
-  openrouter: { cheap: 'openrouter:deepseek/deepseek-v4.1-flash', mid: 'openrouter:anthropic/claude-sonnet-5.5', strong: 'openrouter:anthropic/claude-opus-5.5' },
-  anthropic: { cheap: 'anthropic:claude-haiku-5-5', mid: 'anthropic:claude-sonnet-5-5', strong: 'anthropic:claude-opus-5-5' },
-  deepseek: { cheap: 'deepseek:deepseek-v4-flash', mid: 'deepseek:deepseek-v4-pro', strong: 'deepseek:deepseek-v4-pro' },
-};
 
 /** A key typed earlier with `vf keys`, if the parent wants it; otherwise ask (hidden). */
 async function keyFor(ctx: Ctx, name: string, id: string, label: string): Promise<string> {
@@ -100,56 +92,19 @@ export async function runWizard(opts: WizardOptions): Promise<Body> {
 async function birth(p: Prompter, opts: WizardOptions): Promise<Body> {
   header(p, 'Lv0', '出生');
   const name = (await p.ask('name', '给它起个名字', 'Fox')).trim() || 'Fox';
-  const slug = slugify(name);
-  const root = path.join(agentsDir(), slug);
   const parentName = await p.ask('parent_name', '你的名字（它会叫你"家长"）', os.userInfo().username);
   const preset = await p.choose('soul', '它的性格', [
     ...Object.keys(SOUL_PRESETS).map((k) => ({ value: k, label: `${k}：${SOUL_PRESETS[k].split('\n')[0]}` })),
     { value: 'custom', label: '自己写一段' },
   ]);
   const soulText = preset === 'custom' ? await p.ask('soul_custom', '用几句话描述它的性格') : preset;
-
-  const body = Body.create(root);
-  configureLogs(body.paths.logs);
-  if (!body.exists()) {
-    body.saveIdentity({ name, slug, bornAt: new Date().toISOString(), parent: { name: parentName }, identities: {} });
-  } else {
-    body.updateIdentity((id) => {
-      id.name = name;
-      id.parent.name = parentName;
-    });
-  }
-  body.saveSoul(defaultSoul(name, soulText));
-  if (!fs.existsSync(body.paths.routing)) body.saveRouting(defaultRouting(), 'born');
-  const cfg = { ...defaultConfig(), ...(opts.configOverrides ?? {}) } as AgentConfig;
-  if (opts.configOverrides) {
-    for (const k of Object.keys(opts.configOverrides) as (keyof AgentConfig)[]) {
-      const v = opts.configOverrides[k];
-      if (v && typeof v === 'object' && !Array.isArray(v)) (cfg as unknown as Record<string, unknown>)[k] = { ...(defaultConfig()[k] as object), ...(v as object) };
-    }
-  }
-  body.saveConfig(cfg);
-  setCurrentAgent(slug);
-  const opened = openSelfIdentities(body);
-  p.say(`${C.green('✔')} ${name} 出生了：${C.dim(root)}`);
+  const { body, opened } = await birthAgent({ name, parentName, soul: soulText, configOverrides: opts.configOverrides });
+  p.say(`${C.green('✔')} ${name} 出生了：${C.dim(body.root)}`);
   if (opened.length) p.say(`${C.green('✔')} 它自己开了这些身份：${opened.join('、')}`);
-  body.markLevel('birth');
   return body;
 }
 
 // ---------------- Lv1 brain ----------------
-
-export async function testModel(spec: string, cfg: AgentConfig, secrets: SecretStore): Promise<{ ok: boolean; detail: string }> {
-  try {
-    const m = resolveModel(spec, cfg, secrets);
-    const r = await m.chat({ messages: [{ role: 'user', content: 'Reply with the single word: ready' }], maxTokens: 8, tag: 'onboarding.test' });
-    return { ok: true, detail: r.content.trim().slice(0, 40) || 'ok' };
-  } catch (err) {
-    const msg = String((err as Error).message);
-    if (/guardrail/i.test(msg)) return { ok: false, detail: 'OpenRouter 的防护规则（guardrail）屏蔽了这个模型或供应商，可以在 https://openrouter.ai/settings/privacy 或工作区 guardrails 里放开' };
-    return { ok: false, detail: msg.slice(0, 200) };
-  }
-}
 
 async function brain(ctx: Ctx): Promise<void> {
   const { p, body, secrets } = ctx;
@@ -195,50 +150,15 @@ async function brain(ctx: Ctx): Promise<void> {
       key = await p.secret(`${provider}_key`, `粘贴 ${provider} API key`);
     }
     if (!key) continue;
-    secrets.set(`${provider}_api_key`, key);
-    const cand = TIER_CANDIDATES[provider];
-    const results: Record<string, { ok: boolean; detail: string }> = {};
-    for (const spec of new Set([cand.mid, cand.cheap])) {
-      results[spec] = await testModel(spec, cfg, secrets);
-      p.say(`${results[spec].ok ? C.green('✔') : C.red('✘')} ${spec} ${C.dim(results[spec].detail)}`);
-    }
-    const anyOk = Object.values(results).some((r) => r.ok);
-    body.setIdentityRecord(`brain_${provider}`, {
-      status: anyOk ? 'open' : 'failed',
-      value: `${provider} key …${key.slice(-4)}`,
-      provider,
-      openedBy: 'parent',
-      openedAt: new Date().toISOString(),
-      note: anyOk ? undefined : Object.values(results)[0]?.detail,
-      details: { models: results },
-    });
-    if (provider === 'openrouter') {
-      const info = await keyInfo(cfg, key);
-      if (info) p.say(C.dim(`OpenRouter key：已用 $${info.usage.toFixed(2)}${info.limit != null ? `，上限 $${info.limit}` : '，没设上限——建议在 OpenRouter 给这个 key 设一个额度，这就是它的"脑子预算"'}`));
-    }
+    const r = await connectBrain(body, secrets, { provider, key });
+    for (const [spec, res] of Object.entries(r.models)) p.say(`${res.ok ? C.green('✔') : C.red('✘')} ${spec} ${C.dim(res.detail)}`);
+    const info = r.keyInfo;
+    if (info) p.say(C.dim(`OpenRouter key：已用 $${info.usage.toFixed(2)}${info.limit != null ? `，上限 $${info.limit}` : '，没设上限——建议在 OpenRouter 给这个 key 设一个额度，这就是它的"脑子预算"'}`));
     // The router talks on every message, so it defaults to the cheap model (DeepSeek v4.1 flash on OpenRouter).
-    const routerSpec = results[cand.cheap]?.ok ? cand.cheap : results[cand.mid]?.ok ? cand.mid : undefined;
-    if (routerSpec && (round === 0 || !body.identity().identities.router_model)) {
-      body.updateConfig((c) => {
-        c.router.model = routerSpec;
-        c.voiceModel = results[cand.cheap]?.ok ? cand.cheap : routerSpec;
-      });
-      p.say(`${C.green('✔')} router（它自己）用 ${routerSpec}`);
-    }
+    if (r.routerChanged) p.say(`${C.green('✔')} router（它自己）用 ${r.routerModel}`);
     if (!(await p.confirm(`brain_more_${round}`, '再加一个模型供应商吗？', false))) break;
   }
   body.markLevel('brain');
-}
-
-async function keyInfo(cfg: AgentConfig, key: string): Promise<{ usage: number; limit: number | null } | undefined> {
-  try {
-    const res = await loggedFetch('openrouter', `${cfg.services.openrouter.replace(/\/$/, '')}/key`, { headers: { authorization: `Bearer ${key}` } });
-    if (!res.ok) return undefined;
-    const j = (await res.json()) as { data: { usage: number; limit: number | null } };
-    return { usage: j.data.usage ?? 0, limit: j.data.limit ?? null };
-  } catch {
-    return undefined;
-  }
 }
 
 // ---------------- Lv1 workers ----------------
@@ -315,21 +235,10 @@ async function channel(ctx: Ctx): Promise<void> {
     p.say(C.dim('跳过了。之后运行 vf init --step channel'));
     return;
   }
-  const cfg = body.config();
-  const tg = new TelegramChannel({ token, apiBase: cfg.channel.apiBase });
-  const me = await tg.describe();
-  secrets.set('telegram_bot_token', token);
-  await tg.presentAs(name, `我是 ${name}，一个独立的 AI agent。我只接受我家长布置的任务。`);
-  const code = crypto.randomBytes(4).toString('hex');
-  const s = body.onboarding();
-  s.bindCode = code;
-  body.saveOnboarding(s);
-  body.setIdentityRecord('telegram_bot', { status: 'open', value: me.handle, provider: 'Telegram', openedBy: 'parent', openedAt: new Date().toISOString(), details: { botId: me.id } });
-  const username = me.handle.replace(/^@/, '');
-  p.say(`${C.green('✔')} bot ${me.handle} 准备好了`);
-  p.say(`👉 认领它：打开 ${C.bold(`https://t.me/${username}?start=${code}`)}`);
-  p.say(C.dim(`   （或者给 ${me.handle} 发：/start ${code}；agent 启动后才会回应）`));
-  body.markLevel('channel', 'waiting for /start');
+  const tg = await connectTelegram(body, secrets, { token });
+  p.say(`${C.green('✔')} bot ${tg.handle} 准备好了`);
+  p.say(`👉 认领它：打开 ${C.bold(tg.claimUrl)}`);
+  p.say(C.dim(`   （或者给 ${tg.handle} 发：/start ${tg.bindCode}；agent 启动后才会回应）`));
 }
 
 // ---------------- Lv2 email ----------------
@@ -343,28 +252,18 @@ async function email(ctx: Ctx): Promise<void> {
     p.say(C.dim('跳过了。之后运行 vf init --step email'));
     return;
   }
-  const cfg = body.config();
-  const mail = new AgentMail({ apiKey: key, base: cfg.services.agentmail });
-  const existing = (await mail.listInboxes(10)).inboxes ?? [];
-  secrets.set('agentmail_api_key', key);
-  const id = body.identity();
-  let inbox = undefined as (typeof existing)[number] | undefined;
-  if (existing.length) {
+  const { inboxes } = await emailOptions(body, key);
+  let use: string | undefined;
+  if (inboxes.length) {
     const pick = await p.choose('email_pick', '用哪个邮箱？', [
       { value: 'new', label: '让它给自己开一个新的（免费档最多 3 个）' },
-      ...existing.map((i) => ({ value: i.inbox_id, label: `用已有的 ${i.email ?? i.inbox_id}` })),
+      ...inboxes.map((i) => ({ value: i.id, label: `用已有的 ${i.email}` })),
     ], 'new');
-    inbox = existing.find((i) => i.inbox_id === pick);
+    use = inboxes.find((i) => i.id === pick)?.id;
   }
-  const created = !inbox;
-  if (!inbox) {
-    const username = await p.ask('email_username', '它的邮箱名', `${body.slug}-${crypto.randomBytes(2).toString('hex')}`);
-    inbox = await mail.createInbox({ username, display_name: `${id.name} (AI agent)`, client_id: `vibefox-${body.slug}-${username}` });
-  }
-  const address = inbox.email ?? inbox.inbox_id;
-  body.setIdentityRecord('email', { status: 'open', value: address, provider: 'AgentMail', openedBy: created ? 'self' : 'parent', openedAt: new Date().toISOString(), details: { inboxId: inbox.inbox_id } });
-  p.say(`${C.green('✔')} ${created ? '它给自己开了邮箱' : '它的邮箱'}：${C.bold(address)}`);
-  body.markLevel('email');
+  const username = use ? undefined : await p.ask('email_username', '它的邮箱名', `${body.slug}-${crypto.randomBytes(2).toString('hex')}`);
+  const rec = await openEmail(body, secrets, { key, use, username });
+  p.say(`${C.green('✔')} ${rec.openedBy === 'self' ? '它给自己开了邮箱' : '它的邮箱'}：${C.bold(rec.value ?? '')}`);
 }
 
 // ---------------- Lv3 phone ----------------
@@ -378,47 +277,29 @@ async function phone(ctx: Ctx): Promise<void> {
     p.say(C.dim('跳过了。之后运行 vf init --step phone'));
     return;
   }
-  const cfg = body.config();
-  const ap = new AgentPhone({ apiKey: key, base: cfg.services.agentphone });
-  const existingNumbers = (await ap.listNumbers()).data ?? [];
-  secrets.set('agentphone_api_key', key);
-  const id = body.identity();
-  const agent = await ap.createAgent({
-    name: id.name,
-    description: `${id.name}, an independent AI agent (parent: ${id.parent.name})`,
-    voiceMode: 'hosted',
-    systemPrompt: `You are ${id.name}, an independent AI agent. People who call this number reach you. Say you are an AI agent. Take a message: who they are, what they want, how to reach them. Do not make commitments, do not share personal data or payment details. Personality: ${body.soul().slice(0, 500)}`,
-    beginMessage: `Hi, this is ${id.name}, an AI agent. How can I help?`,
-  });
-  let num = undefined as (typeof existingNumbers)[number] | undefined;
-  if (existingNumbers.length) {
+  const { numbers } = await phoneOptions(body, key);
+  let use: string | undefined;
+  if (numbers.length) {
     const pick = await p.choose('phone_pick', '用哪个号码？', [
-      ...existingNumbers.map((n) => ({ value: n.id, label: `用已有的 ${n.phoneNumber}（不额外花钱）` })),
+      ...numbers.map((n) => ({ value: n.id, label: `用已有的 ${n.phoneNumber}（不额外花钱）` })),
       { value: 'new', label: '再开一个新号码（$3/月）' },
-    ], existingNumbers[0].id);
-    num = existingNumbers.find((n) => n.id === pick);
-    if (num) {
-      try {
-        await ap.attachNumber(agent.id, num.id);
-      } catch (err) {
-        p.say(C.red(`没能把 ${num.phoneNumber} 挂到它的语音 agent 上：${(err as Error).message}`));
-        num = undefined;
-      }
-    }
+    ], numbers[0].id);
+    use = numbers.find((n) => n.id === pick)?.id;
   }
-  const createdNumber = !num;
-  if (!num) {
-    const area = await p.ask('phone_area_code', '想要哪个区号？（美国/加拿大三位数，留空随便）', '');
-    num = await ap.createNumber({ areaCode: area || undefined, agentId: agent.id });
-    if (!num.agentId) await ap.attachNumber(agent.id, num.id);
-  }
-  const now = new Date().toISOString();
-  body.setIdentityRecord('phone', { status: 'open', value: num.phoneNumber, provider: 'AgentPhone', openedBy: createdNumber ? 'self' : 'parent', openedAt: now, details: { numberId: num.id, agentId: agent.id, outboundSms: num.outboundSms } });
-  body.setIdentityRecord('sms_codes', { status: 'open', value: num.phoneNumber, openedBy: 'self', openedAt: now });
-  body.setIdentityRecord('voice', { status: 'open', value: 'AgentPhone hosted voice', openedBy: 'self', openedAt: now, details: { agentId: agent.id } });
-  p.say(`${C.green('✔')} ${createdNumber ? '它给自己开了号码' : '它的号码'}：${C.bold(num.phoneNumber)}${createdNumber ? '' : C.dim('（已挂到它自己的语音 agent 上）')}`);
-  if (num.outboundSms === 'registration_required') p.say(C.dim('美国号码发短信要先在 AgentPhone 后台做 10DLC 登记；打电话不受影响。'));
-  body.markLevel('phone');
+  const askArea = () => p.ask('phone_area_code', '想要哪个区号？（美国/加拿大三位数，留空随便）', '');
+  const areaCode = use ? undefined : await askArea();
+  const rec = await openPhone(body, secrets, {
+    key,
+    use,
+    areaCode,
+    onAttachFailed: async (message) => {
+      p.say(C.red(message));
+      return askArea();
+    },
+  });
+  const createdNumber = rec.openedBy === 'self';
+  p.say(`${C.green('✔')} ${createdNumber ? '它给自己开了号码' : '它的号码'}：${C.bold(rec.value ?? '')}${createdNumber ? '' : C.dim('（已挂到它自己的语音 agent 上）')}`);
+  if (rec.details?.outboundSms === 'registration_required') p.say(C.dim('美国号码发短信要先在 AgentPhone 后台做 10DLC 登记；打电话不受影响。'));
 }
 
 // ---------------- Lv4 money ----------------
@@ -432,23 +313,28 @@ async function money(ctx: Ctx): Promise<void> {
   const perTx = Math.round(Number(await p.ask('money_per_tx', '单笔最多多少美元？', '15')) * 100);
   const allowed: string[] = [];
   p.say(C.dim('下面几个问题只回答 y 或 n：'));
-  for (const cat of ['compute', 'software', 'food', 'shopping', 'travel']) {
+  for (const cat of SPEND_CATEGORIES) {
     if (await p.confirm(`money_allow_${cat}`, `可以买${CATEGORY_LABELS[cat]}？`, cat !== 'travel')) allowed.push(cat);
   }
-  const blocked = ['gift_cards', 'money_transfer', 'crypto', 'gambling'];
-  p.say(`永远不买：${blocked.map((c) => CATEGORY_LABELS[c]).join('、')}（这些是诈骗套现的常见出口）`);
+  p.say(`永远不买：${BLOCKED_CATEGORIES.map((c) => CATEGORY_LABELS[c]).join('、')}（这些是诈骗套现的常见出口）`);
   const id = body.identity();
   p.say('');
   p.say(C.bold(`  我授权 ${id.name} 每月最多花 ${fmtCents(monthly)}，单笔不超过 ${fmtCents(perTx)}。`));
   p.say(C.bold('  这个数字，是我愿意让它搞砸的最大金额。'));
   const sign = await p.ask('money_confirm', '输入"我同意"签字', '');
-  if (!['我同意', 'yes', 'i agree'].includes(sign.trim().toLowerCase())) {
+  if (!consentGiven(sign)) {
     p.say(C.dim('没有签字，零花钱这一步先跳过。'));
     return;
   }
-  const m = createMandate(body, { monthlyLimitCents: monthly, perTransactionLimitCents: perTx, allowedCategories: allowed, blockedCategories: blocked, parentName: id.parent.name });
-  body.saveMandate(m);
-  body.setIdentityRecord('mandate', { status: 'open', value: `${fmtCents(monthly)}/月，单笔 ${fmtCents(perTx)}`, openedBy: 'parent', openedAt: m.signedAt, details: { hash: m.hash } });
+  let m: Mandate;
+  try {
+    m = signMandate(body, { monthlyCents: monthly, perTxCents: perTx, allowed, consent: sign });
+  } catch (err) {
+    if (!(err instanceof StepError)) throw err;
+    p.say(C.red(err.message));
+    p.say(C.dim('零花钱这一步先跳过。之后运行 vf init --step money'));
+    return;
+  }
   p.say(`${C.green('✔')} 授权书已签，${id.name} 用自己的签名密钥确认了（${m.hash!.slice(0, 12)}…）`);
 
   if (!(await p.confirm('wallet_connect', '现在连接 Stripe Link 钱包吗？（仅美国/加拿大；用你自己的 Link 账号）', true))) {
@@ -457,7 +343,7 @@ async function money(ctx: Ctx): Promise<void> {
     return;
   }
   const wallet = new LinkWallet({ bin: body.config().linkCli });
-  let st = await wallet.authStatus();
+  const st = await wallet.authStatus();
   if (!st.authenticated) {
     p.say('下面会出现一个链接和一句话：打开链接（或看 Link app 的通知），核对这句话，然后批准。');
     let shown = false;
@@ -475,15 +361,13 @@ async function money(ctx: Ctx): Promise<void> {
         p.say(`${C.green('✔')} Link 批准了`);
       }
     });
-    st = await wallet.authStatus();
   }
-  if (!st.authenticated) {
+  // Same check the UI polls: completes the login and records the wallet.
+  if (!(await walletCheck(body)).authenticated) {
     p.say(C.red('Link 还没连上。之后运行 vf init --step money 再试。'));
     body.setIdentityRecord('wallet', { status: 'needs-parent', provider: 'Stripe Link', note: 'link-cli auth login not completed' });
     return;
   }
-  const info = await wallet.userInfo().catch(() => ({}));
-  body.setIdentityRecord('wallet', { status: 'open', value: 'Stripe Link agent wallet', provider: 'Stripe Link', openedBy: 'parent', openedAt: new Date().toISOString(), details: { userInfo: info } });
   p.say(`${C.green('✔')} 钱包连上了`);
   if (await p.confirm('wallet_test', '做一笔测试申请看看（测试模式，不扣钱）？', true)) {
     const sr = await wallet.create({ amountCents: 100, merchantName: 'vibefox onboarding test', merchantUrl: 'https://github.com/Dongyu-Jia/vibefox', context: `Onboarding test of ${id.name}'s wallet: a $1.00 test-mode spend request so the parent can see what an approval looks like. No real money moves.`, test: true });
@@ -503,11 +387,13 @@ async function parent(ctx: Ctx): Promise<void> {
   p.say(C.dim('让它认得出你的邮件和短信。别人的邮件和短信只是信息，不是任务。'));
   const em = await p.ask('parent_email', '你的邮箱（留空跳过）', '');
   const ph = await p.ask('parent_phone', '你的手机号（E.164，比如 +14155550123；留空跳过）', '');
-  body.updateIdentity((id) => {
-    if (em) id.parent.email = em.trim();
-    if (ph) id.parent.phone = ph.trim();
-  });
-  body.markLevel('parent');
+  try {
+    setParent(body, { email: em, phone: ph });
+  } catch (err) {
+    if (!(err instanceof StepError)) throw err;
+    p.say(C.red(err.message));
+    p.say(C.dim('先跳过。之后运行 vf init --step parent'));
+  }
 }
 
 // ---------------- install ----------------
