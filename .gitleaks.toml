@@ -1,0 +1,31 @@
+# gitleaks' default rules, plus the providers vibefox actually holds keys for (they mirror
+# redactString in src/core/log.ts). Allowed: key *file names* in the code, and the fake keys
+# that only the local test mocks accept.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''sk-or-v1-[a-f0-9]{40,}'''
+keywords = ["sk-or-v1-"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''\b\d{8,10}:AA[A-Za-z0-9_-]{30,}'''
+keywords = [":AA"]
+
+[[rules]]
+id = "agentmail-agentphone-key"
+description = "AgentMail / AgentPhone API key"
+regex = '''\b(?:am|ap|agentmail|agentphone)_[A-Za-z0-9_-]{16,}'''
+keywords = ["am_", "ap_", "agentmail_", "agentphone_"]
+
+[[allowlists]]
+description = "key file names and fake mock keys"
+regexTarget = "match"
+regexes = [
+  '''['"][a-z0-9_.-]+\.pem['"]''',
+  '''(sk-or-v1-testkey|am_test_key_|ap_test_key_)[0-9a-z]+''',
+]

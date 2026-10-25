@@ -1,0 +1,3 @@
+#!/bin/sh
+# Codex is not exercised by the tests; a non-working stub keeps worker detection the same on every machine.
+exit 1

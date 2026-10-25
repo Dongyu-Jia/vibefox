@@ -1,0 +1,4 @@
+#!/bin/sh
+# Shell shim so `vf` works on PATH for every worker harness.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec node --disable-warning=ExperimentalWarning "$DIR/vf.ts" "$@"

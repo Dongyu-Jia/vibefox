@@ -1,0 +1,20 @@
+node_modules/
+.env.local
+*.log
+evidence/tmp/
+test/.tmp/
+
+# Evidence from real runs (personal data, recordings) stays local
+evidence/
+
+# Never commit keys or a local agent: answers files, env files, secret stores, key files
+.env
+.env.*
+answers*.json
+secrets.json
+setup-keys.json
+*.pem
+id_ed25519*
+.vibefox/
+logs/
+.DS_Store
