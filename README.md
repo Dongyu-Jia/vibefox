@@ -30,6 +30,7 @@ vibefox 造的是一个**独立的 AI agent 个体**，不是 personal agent。
 ```bash
 npm install
 npx playwright install chromium
+./bin/vf keys          # 把 key 存进本地的 .env.local（或者 cp .env.example .env.local 手填）
 ./bin/vf init          # 出生
 ./bin/vf start         # 醒来（装了 launchd 就由 launchd 托管）
 export PATH="$PWD/bin:$PATH"   # 之后直接用 vf

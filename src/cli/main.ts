@@ -29,7 +29,7 @@ export function parseArgs(argv: string[]): Parsed {
 
 const HELP = `vf — vibefox, an independent AI agent individual
 
-  vf keys [--only openrouter,telegram] [--check]   type keys once (hidden), checked live, kept in the Keychain
+  vf keys [--only openrouter,telegram] [--check]   type keys once (hidden), checked live, kept in .env.local (gitignored)
   vf init [--step birth|brain|workers|channel|email|phone|money|parent|install] [--answers file.json]
   vf start [--foreground]        wake the agent (launchd if installed, else foreground)
   vf stop | vf install | vf uninstall | vf status | vf agents | vf use <name>

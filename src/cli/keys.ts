@@ -1,13 +1,13 @@
 import path from 'node:path';
 import { configureLogs, loggedFetch } from '../core/log.ts';
-import { vfRoot } from '../core/paths.ts';
-import { openSecrets, type SecretStore } from '../core/secrets.ts';
+import { PROJECT_ROOT, vfRoot } from '../core/paths.ts';
+import { KeyFileStore, type SecretStore } from '../core/secrets.ts';
 import { color as C, TerminalPrompter, type Prompter } from '../onboarding/prompter.ts';
 
 /**
  * `vf keys`: the parent types keys once (hidden), each is checked live against
- * the real service, and stored in the macOS Keychain (service `vibefox.keys`).
- * `vf init` then offers them, so nobody pastes secrets into a chat.
+ * the real service, and stored in the local key file (`.env.local`, 0600, gitignored;
+ * editing it by hand works too). `vf init` then offers them, so nobody pastes secrets into a chat.
  */
 
 export interface KeyCheck {
@@ -110,9 +110,14 @@ export const KEY_SPECS: KeySpec[] = [
   },
 ];
 
-/** Keys typed with `vf keys`, shared by every agent born on this Mac until moved into one agent's keychain. */
+/** The parent's key file: `.env.local` in the checkout unless VF_KEYS_FILE says otherwise. */
+export function keysFile(): string {
+  return process.env.VF_KEYS_FILE ?? path.join(PROJECT_ROOT, '.env.local');
+}
+
+/** Keys from `vf keys` or the key file, offered to every agent born on this Mac (each copies its own into its keychain). */
 export function setupKeys(): SecretStore {
-  return openSecrets('keys', path.join(vfRoot(), 'setup-keys.json'));
+  return new KeyFileStore(keysFile());
 }
 
 export const tail = (s: string) => `…${s.slice(-4)}`;
@@ -122,7 +127,7 @@ export async function runKeys(opts: { only?: string[]; check?: boolean; prompter
   const store = setupKeys();
   const p = opts.prompter ?? new TerminalPrompter();
   const specs = KEY_SPECS.filter((s) => !opts.only?.length || opts.only.some((o) => s.name.startsWith(o)));
-  p.say(C.bold('🔑 vibefox keys') + C.dim('  —  输入时不显示；回车跳过；每个都会当场去真实服务验证，存进 macOS 钥匙串'));
+  p.say(C.bold('🔑 vibefox keys') + C.dim(`  —  输入时不显示；回车跳过；每个都会当场去真实服务验证，存进本地 key 文件 ${keysFile()}（0600，不进 git）`));
   for (const spec of specs) {
     let key = store.get(spec.name);
     if (!opts.check) {

@@ -17,6 +17,9 @@ import { checkSpend, createMandate, mandateIntact } from '../../src/wallet/manda
 import { parseArgs } from '../../src/cli/main.ts';
 import { formatSnapshot } from '../../src/browser/service.ts';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { KeyFileStore } from '../../src/core/secrets.ts';
+import { PROJECT_ROOT } from '../../src/core/paths.ts';
 
 const mandate: Mandate = {
   version: 1,
@@ -100,6 +103,32 @@ describe('audit log redaction', () => {
     assert.equal(redactString('card 4242424242424242 ok'), 'card •••• 4242 ok');
     assert.equal(redactString('ts 1729771234567 phone +14155550100'), 'ts 1729771234567 phone +14155550100');
     assert.deepEqual(redact({ authorization: 'Bearer x', card: { number: '4000009990001984', cvc: '100' }, key: 'k' }), { authorization: '[REDACTED]', card: { number: '•••• 1984', cvc: '[REDACTED]' }, key: '[REDACTED]' });
+  });
+});
+
+describe('the parent’s key file', () => {
+  it('reads and writes dotenv lines, keeps comments, stays 0600', () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vf-keys-')), '.env.local');
+    fs.writeFileSync(file, '# my keys\nOPENROUTER_API_KEY=\nexport AGENTMAIL_API_KEY="am_quoted"\n', { mode: 0o644 });
+    const store = new KeyFileStore(file);
+    assert.equal(store.get('openrouter_api_key'), undefined, 'an empty value is no key');
+    assert.equal(store.get('agentmail_api_key'), 'am_quoted');
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'a loose file is tightened on read');
+    store.set('openrouter_api_key', 'sk-or-v1-abc');
+    store.set('telegram_bot_token', '123:has space');
+    assert.equal(store.get('openrouter_api_key'), 'sk-or-v1-abc');
+    assert.equal(store.get('telegram_bot_token'), '123:has space');
+    store.delete('agentmail_api_key');
+    assert.equal(fs.readFileSync(file, 'utf8'), '# my keys\nOPENROUTER_API_KEY=sk-or-v1-abc\nTELEGRAM_BOT_TOKEN="123:has space"\n');
+    process.env.VF_SECRET_OPENROUTER_API_KEY = 'from-env';
+    assert.equal(store.get('openrouter_api_key'), 'from-env', 'env still wins');
+    delete process.env.VF_SECRET_OPENROUTER_API_KEY;
+  });
+  it('git never picks up key files, local agents or real-run evidence', (t) => {
+    if (spawnSync('git', ['rev-parse', '--git-dir'], { cwd: PROJECT_ROOT }).status !== 0) return t.skip('not a git checkout');
+    const mustIgnore = ['.env.local', '.env', 'answers.json', 'secrets.json', 'setup-keys.json', 'keys/signing_ed25519.pem', 'my.key', '.vibefox/agents/fox/identity.json', 'evidence/live-real/LIVE-RUN.md'];
+    for (const f of mustIgnore) assert.equal(spawnSync('git', ['check-ignore', '-q', f], { cwd: PROJECT_ROOT }).status, 0, `${f} must be gitignored`);
+    assert.notEqual(spawnSync('git', ['check-ignore', '-q', '.env.example'], { cwd: PROJECT_ROOT }).status, 0, '.env.example is the committed template');
   });
 });
 

@@ -1,5 +1,4 @@
 node_modules/
-.env.local
 *.log
 evidence/tmp/
 test/.tmp/
@@ -7,9 +6,13 @@ test/.tmp/
 # Evidence from real runs (personal data, recordings) stays local
 evidence/
 
-# Never commit keys or a local agent: answers files, env files, secret stores, key files
+# Never commit keys or a local agent. The parent's keys live in .env.local (see .env.example).
 .env
 .env.*
+!.env.example
+*.key
+*.p12
+*.pfx
 answers*.json
 secrets.json
 setup-keys.json

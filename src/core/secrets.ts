@@ -2,8 +2,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
 /**
- * Secrets live in the macOS login keychain (service `vibefox.<slug>`), never in
- * the body folder's JSON files. Tests and non-macOS machines use a 0600 file.
+ * An agent's own secrets live in the macOS login keychain (service `vibefox.<slug>`),
+ * never in the body folder's JSON files; tests and non-macOS machines use a 0600 file.
+ * The parent's keys (`vf keys`) live in a local key file, see KeyFileStore.
  * `VF_SECRET_<NAME>` environment variables always win, which keeps CI simple.
  */
 export interface SecretStore {
@@ -76,6 +77,56 @@ class FileStore implements SecretStore {
     delete data[name];
     fs.writeFileSync(this.file, JSON.stringify(data, null, 2), { mode: 0o600 });
   }
+}
+
+/**
+ * A dotenv key file (`OPENROUTER_API_KEY=sk-or-…`, one per line; `#` comments kept).
+ * Always written 0600, and tightened to 0600 if found looser. It must be gitignored.
+ */
+export class KeyFileStore implements SecretStore {
+  kind = 'file' as const;
+  file: string;
+  constructor(file: string) {
+    this.file = file;
+  }
+  private lines(): string[] {
+    if (!fs.existsSync(this.file)) return [];
+    if (fs.statSync(this.file).mode & 0o077) fs.chmodSync(this.file, 0o600);
+    return fs.readFileSync(this.file, 'utf8').split('\n');
+  }
+  private write(lines: string[]): void {
+    fs.writeFileSync(this.file, lines.join('\n').replace(/\n*$/, '\n'), { mode: 0o600 });
+    fs.chmodSync(this.file, 0o600);
+  }
+  get(name: string): string | undefined {
+    const env = envOverride(name);
+    if (env) return env;
+    for (const line of this.lines()) {
+      const m = KEY_LINE.exec(line);
+      if (m && m[1] === name.toUpperCase()) return unquote(m[2]) || undefined;
+    }
+    return undefined;
+  }
+  set(name: string, value: string): void {
+    const key = name.toUpperCase();
+    const entry = `${key}=${/[\s#'"\\]/.test(value) ? JSON.stringify(value) : value}`;
+    const lines = this.lines();
+    const at = lines.findIndex((l) => KEY_LINE.exec(l)?.[1] === key);
+    if (at >= 0) lines[at] = entry;
+    else lines.splice(lines.length && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length, 0, entry);
+    this.write(lines);
+  }
+  delete(name: string): void {
+    this.write(this.lines().filter((l) => KEY_LINE.exec(l)?.[1] !== name.toUpperCase()));
+  }
+}
+
+const KEY_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/;
+
+function unquote(v: string): string {
+  if (/^".*"$/.test(v)) return JSON.parse(v) as string;
+  if (/^'.*'$/.test(v)) return v.slice(1, -1);
+  return v.replace(/\s+#.*$/, '');
 }
 
 export function openSecrets(slug: string, secretsFile: string): SecretStore {

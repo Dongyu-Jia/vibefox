@@ -35,7 +35,7 @@
 
 | 目录 | 职责 |
 |---|---|
-| `src/core/` | 路径与身体文件夹（`body.ts`）、SQLite 任务账本（`store.ts`，用 Node 自带的 `node:sqlite`）、钥匙串密钥（`secrets.ts`）、审计日志与脱敏（`log.ts`）、原则（`principles.ts`） |
+| `src/core/` | 路径与身体文件夹（`body.ts`）、SQLite 任务账本（`store.ts`，用 Node 自带的 `node:sqlite`）、密钥（`secrets.ts`：agent 自己的在钥匙串，家长的 key 在本地 `.env.local`）、审计日志与脱敏（`log.ts`）、原则（`principles.ts`） |
 | `src/channels/` | `Channel` 接口 + Telegram 实现（长轮询、按钮、编辑、引用回复、文件）。router 只依赖接口 |
 | `src/router/` | router（agent 本人）和派活规则（选择、升级、探索、每周复盘、撤回） |
 | `src/workers/` | worker 管理器、任务简报、harness：builtin（自己的工具循环）、Claude Code、OpenCode、Codex/通用 CLI |
