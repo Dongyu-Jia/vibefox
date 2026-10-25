@@ -1,17 +1,30 @@
-import type { AgentConfig, Body } from '../core/body.ts';
+import type { AgentConfig, Body, Mandate } from '../core/body.ts';
 import { log, logEvent, loggedFetch } from '../core/log.ts';
 import type { SecretStore } from '../core/secrets.ts';
 import { shortId, type InboxItem, type Store } from '../core/store.ts';
 import { AgentMail, MailWatcher, addressOf, mailBody, type MailItem } from '../identity/agentmail.ts';
 import { AgentPhone, callSystemPrompt, extractCode } from '../identity/agentphone.ts';
+import { verify } from '../identity/selfmade.ts';
 import { LinkWallet } from '../wallet/link.ts';
-import { checkSpend, fmtCents } from '../wallet/mandate.ts';
+import { checkSpend, fmtCents, mandateIntact } from '../wallet/mandate.ts';
 import path from 'node:path';
 
 export interface InboxSink {
   onInboxItem(item: InboxItem): Promise<void>;
   notifyParent(text: string, opts?: { taskId?: string }): Promise<unknown>;
 }
+
+/** A verification code or link that reached the agent: what the parent needs on screen while signing it up somewhere. */
+export interface RecentCode {
+  at: string;
+  channel: 'email' | 'sms';
+  from: string;
+  subject?: string;
+  code?: string;
+  link?: string;
+}
+
+export const TAMPERED_MANDATE = '授权书和签名对不上（可能被改过），先不花钱；请家长在控制台重新签一次';
 
 /** The agent's identities, as live services: its inbox, its phone, its wallet. */
 export class Services {
@@ -24,7 +37,14 @@ export class Services {
   phone?: { client: AgentPhone; agentId: string; numberId: string; number: string };
   wallet: LinkWallet;
   private watcher?: MailWatcher;
-  private timers: NodeJS.Timeout[] = [];
+  private timers = new Set<NodeJS.Timeout>();
+  /** start() was called and stop() wasn't since: what reload() restores. */
+  private wanted = false;
+  private running = false;
+  /** Bumped by every start/stop, so a poll loop from before a restart never schedules itself again. */
+  private generation = 0;
+  private inflight = new Set<Promise<void>>();
+  private reloading: Promise<void> = Promise.resolve();
 
   constructor(body: Body, store: Store, secrets: SecretStore) {
     this.body = body;
@@ -36,6 +56,8 @@ export class Services {
   }
 
   init(): void {
+    this.mail = undefined;
+    this.phone = undefined;
     const id = this.body.identity();
     const mailKey = this.secrets.get('agentmail_api_key');
     const email = id.identities.email;
@@ -63,6 +85,11 @@ export class Services {
   }
 
   start(): void {
+    this.wanted = true;
+    if (this.running) return;
+    this.running = true;
+    const gen = ++this.generation;
+    const live = () => this.running && this.generation === gen;
     if (this.mail) {
       const mailKey = this.secrets.get('agentmail_api_key')!;
       const realtime = !/localhost|127\.0\.0\.1/.test(this.config.services.agentmail);
@@ -82,12 +109,17 @@ export class Services {
       const pollMs = this.config.mail.pollSeconds * 1000;
       const loop = (fn: () => Promise<void>, every: number) => {
         const tick = async () => {
-          if (this.stopped) return;
+          if (!live()) return;
           const p = fn().catch((e) => log('phone poll error', String(e.message ?? e)));
           this.inflight.add(p);
           await p;
           this.inflight.delete(p);
-          if (!this.stopped) this.timers.push(setTimeout(tick, every));
+          if (!live()) return;
+          const t = setTimeout(() => {
+            this.timers.delete(t);
+            void tick();
+          }, every);
+          this.timers.add(t);
         };
         void tick();
       };
@@ -96,14 +128,39 @@ export class Services {
     }
   }
 
-  private stopped = false;
-  private inflight = new Set<Promise<void>>();
-
   async stop(): Promise<void> {
-    this.stopped = true;
+    this.wanted = false;
+    await this.halt();
+  }
+
+  private async halt(): Promise<void> {
+    this.running = false;
+    this.generation++;
     for (const t of this.timers) clearTimeout(t);
-    await this.watcher?.stop();
+    this.timers.clear();
+    const watcher = this.watcher;
+    this.watcher = undefined;
+    await watcher?.stop();
     await Promise.all([...this.inflight]);
+  }
+
+  /**
+   * Re-read identity, keys and config (the parent just gave it an email, a number or a wallet in
+   * the console) and restart the watchers. Restarts only what was running: after stop(), it just
+   * refreshes. Calls queue up, so two quick saves in the console don't race.
+   */
+  reload(): Promise<void> {
+    const run = this.reloading.then(async () => {
+      await this.halt();
+      this.config = this.body.config();
+      this.wallet = new LinkWallet({ bin: this.config.linkCli });
+      this.init();
+      // A stop() that lands while this reload waits for the old watchers still wins.
+      if (this.wanted) this.start();
+      logEvent('services.reloaded', { mail: Boolean(this.mail), phone: Boolean(this.phone), running: this.running });
+    });
+    this.reloading = run.catch(() => {});
+    return run;
   }
 
   private signature(): string {
@@ -149,7 +206,11 @@ export class Services {
     const parentEmail = this.body.identity().parent.email?.toLowerCase();
     const text = mailBody(m);
     const threadTask = this.store.threadTask(m.thread_id);
-    const classification: InboxItem['classification'] = threadTask ? 'task-related' : parentEmail && addressOf(m.from) === parentEmail ? 'parent' : extractCode(`${m.subject ?? ''} ${text}`) ? 'code' : 'stranger';
+    const code = extractCode(`${m.subject ?? ''} ${text}`);
+    const classification: InboxItem['classification'] = threadTask ? 'task-related' : parentEmail && addressOf(m.from) === parentEmail ? 'parent' : code ? 'code' : 'stranger';
+    // The html part keeps links the plain text may have lost ("Verify email" buttons).
+    const link = verificationLink(text) ?? (m.html ? verificationLink(htmlText(m.html)) : undefined);
+    const data = { ...(classification === 'code' ? { code } : {}), ...(link ? { link } : {}) };
     const item = this.store.addInbox({
       source: 'email',
       external_id: m.message_id,
@@ -161,7 +222,7 @@ export class Services {
       received_at: m.timestamp,
       task_id: threadTask ?? null,
       classification,
-      data: classification === 'code' ? JSON.stringify({ code: extractCode(`${m.subject ?? ''} ${text}`) }) : null,
+      data: Object.keys(data).length ? JSON.stringify(data) : null,
     });
     if (item) await this.sink?.onInboxItem(item);
   }
@@ -219,6 +280,36 @@ export class Services {
   codes(): unknown {
     const rows = this.store.db.prepare(`SELECT source, sender, body, received_at, data FROM inbox WHERE data LIKE '%"code"%' ORDER BY received_at DESC LIMIT 10`).all() as { source: string; sender: string; body: string; received_at: string; data: string }[];
     return rows.map((r) => ({ code: JSON.parse(r.data).code, from: r.sender, via: r.source, at: r.received_at, text: r.body.slice(0, 160) }));
+  }
+
+  /**
+   * Codes and verification links that reached its email and number since `sinceIso` (an
+   * unreadable value means the last 15 minutes), newest first. The console shows them live while
+   * the parent signs it up somewhere. Messages from the parent are not codes.
+   */
+  async recentCodes(sinceIso: string): Promise<RecentCode[]> {
+    const parsed = Date.parse(sinceIso);
+    const since = Number.isFinite(parsed) ? parsed : Date.now() - 15 * 60_000;
+    const rows = this.store.db
+      .prepare(`SELECT * FROM inbox WHERE source IN ('email','sms') AND classification != 'parent' ORDER BY received_at DESC LIMIT 200`)
+      .all() as unknown as InboxItem[];
+    const out: (RecentCode & { ms: number })[] = [];
+    for (const r of rows) {
+      const ms = Date.parse(r.received_at);
+      if (!(ms >= since)) continue;
+      let data: { code?: string; link?: string } = {};
+      try {
+        data = r.data ? (JSON.parse(r.data) as typeof data) : {};
+      } catch {}
+      const code = data.code ?? (r.classification === 'code' ? extractCode(`${r.subject ?? ''} ${r.body}`) : undefined);
+      const link = r.source === 'email' ? (data.link ?? verificationLink(r.body)) : undefined;
+      if (!code && !link) continue;
+      out.push({ ms, at: r.received_at, channel: r.source as RecentCode['channel'], from: r.sender, ...(r.subject ? { subject: r.subject } : {}), ...(code ? { code } : {}), ...(link ? { link } : {}) });
+    }
+    return out
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 20)
+      .map(({ ms: _ms, ...c }) => c);
   }
 
   // ---------- calls ----------
@@ -279,6 +370,15 @@ export class Services {
     note: (s: string) => void,
   ): Promise<Record<string, unknown>> {
     const mandate = this.body.mandate();
+    // The signed mandate is the only thing that lets it spend: one edited on disk (by a worker, a
+    // stray script) is no mandate at all, and the parent hears about it.
+    if (mandate && !mandateSigned(this.body, mandate)) {
+      logEvent('pay.check', { ...input, ok: false, reason: TAMPERED_MANDATE, tampered: true });
+      await this.sink
+        ?.notifyParent(`⚠️ 我的零花钱授权书和我的签名对不上（可能被改过），所以没在 <b>${escapeHtml(input.merchantName)}</b> 花钱。请在控制台重新签一次授权书。`, { taskId: input.taskId })
+        .catch(() => {});
+      return { status: 'refused', reason: TAMPERED_MANDATE };
+    }
     const spent = this.store.spentThisMonthCents();
     const check = checkSpend(mandate, input, input.test ? 0 : spent, this.frozen());
     logEvent('pay.check', { ...input, ok: check.ok, reason: check.reason, spentThisMonthCents: spent });
@@ -346,4 +446,52 @@ export function normalizeNumber(n: string): string {
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** The mandate's hash matches its body, and the hash carries the agent's own signature. */
+function mandateSigned(body: Body, m: Mandate): boolean {
+  if (!m.hash || !m.agentSignature || !mandateIntact(m)) return false;
+  try {
+    return verify(body, m.hash, m.agentSignature);
+  } catch {
+    return false;
+  }
+}
+
+const VERIFY_WORDS = /verif|confirm|activat|validat|magic.?link|验证|确认|激活/i;
+
+/**
+ * The first https link in a message that verifies, confirms or activates something. A link that
+ * says so itself wins; otherwise one right after such words ("Verify your email: https://…").
+ * Never the unsubscribe link, never a bare homepage.
+ */
+export function verificationLink(text: string): string | undefined {
+  const found: { url: string; before: string }[] = [];
+  let prev = 0;
+  for (const m of text.matchAll(/https:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%]+/g)) {
+    const url = m[0].replace(/[.,;:!?]+$/, '');
+    found.push({ url, before: text.slice(Math.max(prev, m.index - 160), m.index) });
+    prev = m.index + m[0].length;
+  }
+  const usable = found.filter((f) => !/unsubscribe|opt.?out|preferences/i.test(f.url));
+  const named = usable.find((f) => VERIFY_WORDS.test(f.url));
+  if (named) return named.url;
+  const near = usable.find((f) => {
+    if (!VERIFY_WORDS.test(f.before)) return false;
+    try {
+      const u = new URL(f.url);
+      return u.pathname.length > 1 || u.search.length > 1;
+    } catch {
+      return false;
+    }
+  });
+  return near?.url;
+}
+
+/** Mail html as text, each link's address written right after its label. */
+function htmlText(html: string): string {
+  return html
+    .replace(/<a\b[^>]*?\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi, (_m, _q, href: string, label: string) => ` ${label.replace(/<[^>]+>/g, ' ')} ${href} `)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&');
 }
