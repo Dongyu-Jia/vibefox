@@ -7,6 +7,7 @@ import { logEvent } from '../core/log.ts';
 import { shortId, type Store } from '../core/store.ts';
 import { IDENTITY_KINDS, OPENER_LABEL } from '../identity/registry.ts';
 import { openSelfIdentities } from '../identity/selfmade.ts';
+import { esc } from '../channels/format.ts';
 import { errorStatus } from '../control/errors.ts';
 import { gate, HttpError, readJson, sameToken, bearer, sendJson, serveUi } from '../control/http.ts';
 import { identityViews, resourceView } from '../control/routes.ts';
@@ -99,7 +100,7 @@ export function createApi(deps: ApiDeps): http.Server {
   };
 
   const identitySummary = () => {
-    const id = deps.body.identity();
+    const id = shareableIdentity(deps.body.identity());
     const lines = [`${id.name} — independent AI agent; parent: ${id.parent.name}`];
     for (const k of IDENTITY_KINDS) {
       const r = id.identities[k.id];
@@ -151,7 +152,7 @@ export function createApi(deps: ApiDeps): http.Server {
       const kind = resourceKind(String(body.kind ?? ''));
       const why = String(body.why ?? '').slice(0, 600);
       logEvent('resource.requested', { kind: body.kind, why, taskId: body.taskId });
-      await router.notifyParent(`🧩 我需要一个资源：<b>${kind?.label ?? String(body.kind)}</b>${why ? '\n' + why.replace(/[<>&]/g, '') : ''}\n\n在 Mac 上运行 <code>vf ui resources/add/${kind?.id ?? 'custom'}</code> 就能直接交给我。`);
+      await router.notifyParent(`🧩 我需要一个资源：<b>${esc(kind?.label ?? String(body.kind).slice(0, 60))}</b>${why ? '\n' + esc(why) : ''}\n\n在 Mac 上运行 <code>vf ui resources/add/${kind?.id ?? 'custom'}</code> 就能直接交给我。`);
       return { ok: true };
     }
     if (p === '/v1/resources' && method === 'POST') {
@@ -175,7 +176,7 @@ export function createApi(deps: ApiDeps): http.Server {
       });
       logEvent('resource.self-added', { id: r.id, kind: kind.id, parent: r.parent, taskId: body.taskId });
       deps.body.appendJournal(`- 我自己加了一个资源：${r.label}${r.handle ? ' ' + r.handle : ''}${r.parent ? `（建在 ${r.parent} 上）` : ''}`);
-      await router.notifyParent(`🧩 我自己加了一个资源：<b>${r.label.replace(/[<>&]/g, '')}</b>${r.handle ? ' ' + r.handle.replace(/[<>&]/g, '') : ''}${r.parent ? `（建在 ${r.parent} 上）` : ''}`);
+      await router.notifyParent(`🧩 我自己加了一个资源：<b>${esc(r.label)}</b>${r.handle ? ' ' + esc(r.handle) : ''}${r.parent ? `（建在 ${esc(r.parent)} 上）` : ''}`);
       return { resource: resourceView(deps.resources, r) };
     }
     if (seg[1] === 'resources' && seg[2] && method === 'POST') {

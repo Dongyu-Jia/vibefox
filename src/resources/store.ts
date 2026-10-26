@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { noteWrite } from '../core/writes.ts';
+import { noteRead, noteWrite } from '../core/writes.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Body } from '../core/body.ts';
@@ -103,6 +103,7 @@ export class Resources {
   }
 
   private read(): Resource[] {
+    noteRead(this.file);
     if (!fs.existsSync(this.file)) return [];
     const data = JSON.parse(fs.readFileSync(this.file, 'utf8')) as ResourcesFile | Resource[];
     return Array.isArray(data) ? data : (data.resources ?? []);
@@ -313,13 +314,17 @@ export class Resources {
     });
   }
 
-  /** Env for workers: per kind, the first usable resource (the one named after the kind first). */
+  /**
+   * Env for workers: per kind, the parent's own credential — verified ones
+   * first, then the one named after the kind. Something a worker appended never
+   * becomes another worker's GITHUB_TOKEN.
+   */
   workerEnv(): Record<string, string> {
     const env: Record<string, string> = {};
     const kindsDone = new Set<string>();
     const list = this.read()
-      .filter((r) => USABLE.has(r.status))
-      .sort((a, b) => Number(b.id === b.kind) - Number(a.id === a.kind));
+      .filter((r) => USABLE.has(r.status) && r.origin === 'parent')
+      .sort((a, b) => Number(b.status === 'ok') - Number(a.status === 'ok') || Number(b.id === b.kind) - Number(a.id === a.kind));
     const handed: string[] = [];
     for (const r of list) {
       const kind = resourceKind(r.kind);

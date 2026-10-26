@@ -24,13 +24,17 @@ function refuseInWorker(): void {
   if (inWorker()) throw new Error('vf ui / vf init are for the parent. Workers cannot open the control plane; ask the router instead.');
 }
 
-/** A fresh control-plane link (one-time code) for an agent whose daemon is up. */
+/** Nobody clicked "打开控制台" in the dialog on this Mac. */
+class DeniedError extends Error {}
+
+/** A fresh control-plane link (one-time code) for an agent whose daemon is up. The daemon asks the person at this Mac first. */
 export async function controlUrl(body: Body): Promise<string> {
   if (!fs.existsSync(body.paths.daemonJson)) throw new Error('not running');
   const info = JSON.parse(fs.readFileSync(body.paths.daemonJson, 'utf8')) as { url: string; token: string };
   const health = await fetch(`${info.url}/v1/health`).then((r) => r.ok).catch(() => false);
   if (!health) throw new Error('not running');
   const res = await fetch(`${info.url}/v1/control/login-code`, { method: 'POST', headers: { authorization: `Bearer ${info.token}` } });
+  if (res.status === 403) throw new DeniedError();
   if (!res.ok) throw new Error(`control plane refused: ${res.status}`);
   const { code } = (await res.json()) as { code: string };
   return `${info.url}/ui/#code=${code}`;
@@ -42,14 +46,20 @@ async function waitForDaemon(body: Body, timeoutMs: number): Promise<string> {
     try {
       return await controlUrl(body);
     } catch (err) {
+      if (err instanceof DeniedError) throw new Error('没有允许打开控制台；之后运行 vf ui 再开');
       if (Date.now() > until) throw new Error(`the agent did not wake up in ${Math.round(timeoutMs / 1000)}s (${(err as Error).message}); try vf start`);
       await new Promise((r) => setTimeout(r, 500));
     }
   }
 }
 
-/** Wakes the agent under launchd (24/7) and returns its control-plane link. */
+/** Wakes the agent under launchd (24/7) and returns its control-plane link. VF_SETUP_LAUNCH=inprocess runs it in this process instead (demos, machines without launchd). */
 async function wake(body: Body): Promise<string> {
+  if (process.env.VF_SETUP_LAUNCH === 'inprocess') {
+    const { startDaemon } = await import('../daemon/daemon.ts');
+    await startDaemon({ slug: body.slug });
+    return waitForDaemon(body, 15_000);
+  }
   const r = install(body);
   if (!r.loaded) throw new Error(`launchd: ${r.out}`);
   body.markLevel('install');
@@ -63,9 +73,14 @@ export async function openControlPlane(route?: string): Promise<void> {
   if (!slug) return runSetupInBrowser();
   const body = Body.open(slug);
   let url: string;
+  console.log(`在这台 Mac 上弹出的对话框里点「打开控制台」（60 秒内）。`);
   try {
     url = await controlUrl(body);
-  } catch {
+  } catch (err) {
+    if (err instanceof DeniedError) {
+      console.log('没有允许，控制台没打开。');
+      return;
+    }
     if (!launchdStatus(slug).installed) {
       console.log(`${body.identity().name} 没在运行。用 vf start 叫醒它（或 vf install 让它常驻），再运行 vf ui。`);
       return;
@@ -90,4 +105,5 @@ export async function runSetupInBrowser(): Promise<void> {
   // Give the page a moment to follow the redirect before this server goes away.
   await new Promise((r) => setTimeout(r, 4000));
   await setup.close();
+  if (process.env.VF_SETUP_LAUNCH === 'inprocess') console.log('它在这个进程里醒着；Ctrl-C 结束。');
 }

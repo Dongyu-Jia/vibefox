@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { TelegramChannel, TelegramError } from '../channels/telegram.ts';
-import { Body, defaultConfig, defaultRouting, defaultSoul, type AgentConfig, type IdentityRecord, type LegalProfile, type Mandate } from '../core/body.ts';
+import { Body, defaultConfig, defaultRouting, defaultSoul, type AgentConfig, type IdentityRecord, type LegalProfile, type Mandate, type WorkerSpec } from '../core/body.ts';
+import { detectHarnesses, type HarnessDetection } from './detect.ts';
 import { configureLogs, loggedFetch } from '../core/log.ts';
 import { agentsDir, setCurrentAgent, slugify } from '../core/paths.ts';
 import type { SecretStore } from '../core/secrets.ts';
@@ -175,11 +176,84 @@ export async function connectBrain(body: Body, secrets: SecretStore, input: { pr
       c.voiceModel = results[cand.cheap]?.ok ? cand.cheap : routerSpec;
     });
     body.markLevel('brain');
+    addWorkers(body, secrets, NO_HARNESSES);
   }
   const lines = specs.map((spec) => `${results[spec].ok ? '✔' : '✘'} ${spec}${results[spec].ok ? '' : `：${results[spec].detail}`}`);
   if (info) lines.push(`key 已用 $${info.usage.toFixed(2)}${info.limit != null ? ` / 上限 $${info.limit}` : '（没设上限）'}`);
   return { ok: anyOk, detail: lines.join('；'), routerModel: body.config().router.model, routerChanged: Boolean(routerSpec), models: results, keyInfo: info };
 }
+
+
+// ---------------- Lv1 workers ----------------
+
+export type WorkerCandidate = WorkerSpec & { why: string };
+
+/** The workers this Mac can run: builtin ones for each model key the agent holds, plus every harness found. */
+export function workerCandidates(body: Body, secrets: SecretStore, det: HarnessDetection): WorkerCandidate[] {
+  const brains = body.identity().identities;
+  const okModels = (prov: Provider) => (brains[`brain_${prov}`]?.details?.models ?? {}) as Record<string, { ok: boolean }>;
+  const candidates: (WorkerSpec & { why: string })[] = [];
+  for (const prov of ['openrouter', 'anthropic', 'deepseek'] as Provider[]) {
+    if (!secrets.get(`${prov}_api_key`)) continue;
+    const cand = TIER_CANDIDATES[prov];
+    const ok = okModels(prov);
+    candidates.push({ id: `builtin-${prov}-cheap`, label: `便宜档 · ${cand.cheap.split(':')[1]}`, harness: 'builtin', model: cand.cheap, tier: 1, enabled: ok[cand.cheap]?.ok !== false, description: '便宜：重复性的杂活、查资料、整理', why: ok[cand.cheap]?.ok === false ? '测试没通过' : '' });
+    candidates.push({ id: `builtin-${prov}-mid`, label: `中档 · ${cand.mid.split(':')[1]}`, harness: 'builtin', model: cand.mid, tier: 2, enabled: ok[cand.mid]?.ok !== false, description: '日常任务：写东西、发邮件、用浏览器办事', why: ok[cand.mid]?.ok === false ? '测试没通过' : '' });
+  }
+  if (det.opencode.installed && det.opencode.providers.length) {
+    const prov = det.opencode.providers.includes('openrouter') ? 'openrouter' : det.opencode.providers[0];
+    const model = prov === 'openrouter' ? 'openrouter/deepseek/deepseek-v4.1-flash' : `${prov}/default`;
+    candidates.push({ id: 'opencode-deepseek', label: `OpenCode · ${model.split('/').slice(1).join('/')}`, harness: 'opencode', model, tier: 1, enabled: true, description: 'OpenCode harness，便宜模型，适合批量杂活', why: '' });
+  }
+  if (det.dsh.installed && (secrets.get('openrouter_api_key') || secrets.get('deepseek_api_key'))) {
+    const model = secrets.get('openrouter_api_key') ? 'openrouter/deepseek/deepseek-v4.1-flash' : 'deepseek/deepseek-v4-flash';
+    candidates.push({ id: 'deepseek-harness', label: `DeepSeek Harness（官方 dsh）· ${model.split('/').slice(-1)[0]}`, harness: 'dsh', model, tier: 1, enabled: true, description: 'DeepSeek 官方的 agent harness，便宜，适合杂活和网页任务', why: '' });
+  }
+  if (det.codewhale.installed && (secrets.get('openrouter_api_key') || secrets.get('deepseek_api_key'))) {
+    const model = secrets.get('openrouter_api_key') ? 'openrouter/deepseek/deepseek-v4.1-flash' : 'deepseek/deepseek-v4-flash';
+    candidates.push({ id: 'codewhale-deepseek', label: `Codewhale · ${model.split('/').slice(-1)[0]}`, harness: 'codewhale', model, tier: 1, enabled: true, description: 'DeepSeek 专用 harness（Codewhale），便宜，适合杂活和网页任务', why: '' });
+  }
+  if (det.claude.installed) {
+    candidates.push({ id: 'claude-code', label: '最强档 · Claude Code (Opus)', harness: 'claude-code', model: 'opus', tier: 3, enabled: det.claude.loggedIn, description: '最难的任务：复杂的多步操作、写代码、难搞的网站', why: det.claude.loggedIn ? '' : '还没登录：运行 claude auth login' });
+  }
+  if (det.codex.works) {
+    candidates.push({ id: 'codex', label: 'Codex', harness: 'codex', tier: 3, enabled: false, description: 'OpenAI Codex CLI', why: '' });
+  }
+  return candidates;
+}
+
+/** Records which harnesses this Mac has (the harness_* identities). */
+export function recordHarnesses(body: Body, det: HarnessDetection): void {
+  const now = new Date().toISOString();
+  if (det.opencode.installed) {
+    body.setIdentityRecord('harness_opencode', { status: det.opencode.providers.length ? 'open' : 'needs-parent', value: det.opencode.providers.join(', ') || undefined, provider: 'OpenCode', openedBy: 'parent', openedAt: now, note: det.opencode.providers.length ? undefined : 'opencode auth login' });
+  }
+  if (det.dsh.installed) body.setIdentityRecord('harness_deepseek', { status: 'open', value: 'dsh', provider: 'DeepSeek', openedBy: 'parent', openedAt: now });
+  if (det.codewhale.installed) body.setIdentityRecord('harness_codewhale', { status: 'open', value: 'codewhale', provider: 'Codewhale', openedBy: 'parent', openedAt: now });
+  if (det.claude.installed) {
+    body.setIdentityRecord('harness_claude_code', { status: det.claude.loggedIn ? 'open' : 'needs-parent', value: det.claude.loggedIn ? det.claude.detail : undefined, provider: 'Anthropic', openedBy: 'parent', openedAt: now, note: det.claude.loggedIn ? undefined : 'claude auth login' });
+  }
+}
+
+/**
+ * Adds the workers this Mac can run that are not listed yet, keeping the
+ * parent's on/off choices for the ones that are. `det` skips harness detection
+ * (connectBrain only needs the builtin workers for its new key).
+ */
+export function addWorkers(body: Body, secrets: SecretStore, det?: HarnessDetection): { added: string[] } {
+  const found = det ?? detectHarnesses();
+  const existing = body.workers();
+  const ids = new Set(existing.map((w) => w.id));
+  const added = workerCandidates(body, secrets, found)
+    .filter((c) => !ids.has(c.id))
+    .map(({ why: _why, ...spec }) => spec);
+  if (added.length) body.saveWorkers([...existing, ...added]);
+  if (det === undefined) recordHarnesses(body, found);
+  if (body.workers().some((w) => w.enabled)) body.markLevel('workers');
+  return { added: added.map((w) => w.id) };
+}
+
+const NO_HARNESSES: HarnessDetection = { claude: { installed: false, loggedIn: false }, opencode: { installed: false, providers: [] }, codex: { installed: false, works: false }, dsh: { installed: false }, codewhale: { installed: false } };
 
 // ---------------- Lv1 channel ----------------
 

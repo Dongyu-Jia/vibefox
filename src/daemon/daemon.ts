@@ -8,6 +8,7 @@ import { Body } from '../core/body.ts';
 import { configureLogs, log, logEvent } from '../core/log.ts';
 import { openSecrets } from '../core/secrets.ts';
 import { Store } from '../core/store.ts';
+import { watchSecrets } from '../core/writes.ts';
 import { Guard } from '../control/guard.ts';
 import { Ops, Sessions } from '../control/http.ts';
 import { createControl } from '../control/routes.ts';
@@ -55,7 +56,9 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
   const body = Body.open(opts.slug);
   configureLogs(body.paths.logs);
   const config = body.config();
-  const secrets = openSecrets(body.slug, body.paths.secretsFile);
+  // Everyone in the daemon uses the watched store, so the guard knows which secret changes are the daemon's own.
+  const rawSecrets = openSecrets(body.slug, body.paths.secretsFile);
+  const secrets = watchSecrets(rawSecrets);
   const store = new Store(body.paths.db);
 
   let token = secrets.get('daemon_token');
@@ -165,7 +168,7 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
   // Identities and resources are read-only for workers; this puts them back if a shell changes them anyway.
   const guard = new Guard({
     body,
-    secrets,
+    secrets: rawSecrets,
     resources,
     notify: (text) => void router.notifyParent(text).catch(() => {}),
     fileIntervalMs: Number(process.env.VF_GUARD_MS ?? 2000),

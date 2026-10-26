@@ -8,13 +8,14 @@ import type { Store } from '../core/store.ts';
 import { IDENTITY_KINDS } from '../identity/registry.ts';
 import { verify as verifySignature } from '../identity/selfmade.ts';
 import { parseModelSpec, usableModel } from '../llm/index.ts';
-import { connectBrain, connectTelegram, setParent, signMandate, walletCheck, walletConnectStart, walletDisconnect } from '../onboarding/steps.ts';
+import { addWorkers, connectBrain, connectTelegram, setParent, signMandate, walletCheck, walletConnectStart, walletDisconnect } from '../onboarding/steps.ts';
 import { RESOURCE_GROUPS, RESOURCE_KINDS, publicKind, resourceKind, type ResourceGroup } from '../resources/catalog.ts';
 import { generatePassword, type Resource, type Resources } from '../resources/store.ts';
 import type { Router } from '../router/router.ts';
 import { CATEGORY_LABELS, fmtCents, mandateIntact } from '../wallet/mandate.ts';
 import type { WorkerManager } from '../workers/manager.ts';
 import type { Services } from '../daemon/services.ts';
+import { parentConfirms } from './confirm.ts';
 import { errorStatus } from './errors.ts';
 import { bearer, HttpError, readJson, sameToken, sendJson, type Ops, type Sessions } from './http.ts';
 
@@ -78,7 +79,8 @@ export function resourceView(resources: Resources, r: Resource): ResourceView {
     ...r,
     source: 'resource',
     group: resourceKind(r.kind)?.group ?? 'custom',
-    hasSecret: Object.fromEntries(r.secretFields.map((f) => [f, Boolean(resources.secret(r.id, f))])),
+    // secretFields is kept in step with the keychain by the store (and the guard restores deletions): no audited read per listing.
+    hasSecret: Object.fromEntries(r.secretFields.map((f) => [f, true])),
   };
 }
 
@@ -193,7 +195,7 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
           ...(optStr(body.access) ? { access: optStr(body.access) as Resource['access'] } : {}),
           fields: strMap(body.fields),
         });
-        const checked = kind.verify && (methodName === 'token' || methodName === 'file') ? await d.resources.verify(updated.id) : d.resources.update(updated.id, { status: methodName === 'password' || methodName === 'browser' ? 'ok' : 'unverified' });
+        const checked = kind.verify && (methodName === 'token' || methodName === 'file') ? await d.resources.verify(updated.id) : updated;
         logEvent('control.resource.updated', { id: checked.id, kind: kind.id, method: methodName, status: checked.status });
         notify(`🧩 ${kind.label}${checked.handle ? ' ' + checked.handle : ''} 交给我了（${checked.access === 'full' ? '完全权限' : checked.access}${checked.status === 'ok' ? '，验证通过' : checked.status === 'failed' ? '，验证没通过' : ''}）`);
         return { resource: resourceView(d.resources, checked) };
@@ -218,11 +220,17 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
     }
     if (p === '/v1/control/resources/draft' && post) {
       const kind = must(resourceKind(str(body.kind, 'kind', 80)), 'such resource kind');
-      if (!kind.methods.includes('password')) throw new HttpError(400, `${kind.label} 不用密码`);
+      if (!kind.methods.includes('password') && !kind.signupUrl && !kind.loginUrl) throw new HttpError(400, `${kind.label} 不用注册`);
+      // The account's own password is worth keeping even when the hand-over is a token (Cloudflare, AWS…).
       const password = generatePassword();
       const login = d.body.identity().identities.email?.value;
-      const r = d.resources.add({ kind: kind.id, method: 'password', status: 'pending', origin: 'parent', addedBy: 'parent', access: 'full', fields: { password, ...(login ? { login } : {}) } });
-      logEvent('control.resource.draft', { id: r.id, kind: kind.id });
+      const fields = { password, ...(login ? { login } : {}) };
+      const asked = optStr(body.id) ? d.resources.get(optStr(body.id)!) : undefined;
+      const pending = asked?.kind === kind.id ? asked : d.resources.list().find((x) => x.kind === kind.id && x.origin === 'parent' && x.status === 'pending');
+      const r = pending
+        ? d.resources.update(pending.id, { fields })
+        : d.resources.add({ kind: kind.id, method: kind.methods.includes('password') ? 'password' : kind.methods[0], status: 'pending', origin: 'parent', addedBy: 'parent', access: 'full', fields });
+      logEvent('control.resource.draft', { id: r.id, kind: kind.id, reused: Boolean(pending) });
       return { resource: resourceView(d.resources, r), password };
     }
     if (seg[2] === 'resources' && seg.length >= 4 && post) {
@@ -290,7 +298,14 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
     if (p === '/v1/control/telegram' && get) return telegramState();
     if (p === '/v1/control/telegram' && post) {
       const token = body.usePreset ? presetKey('telegram_bot_token') : str(body.token, 'token');
+      const before = d.body.identity().identities.telegram_bot?.details?.botId;
       const r = await connectTelegram(d.body, d.secrets, { token });
+      const after = d.body.identity().identities.telegram_bot?.details?.botId;
+      if (before !== undefined && before !== after) {
+        // A new bot has its own update ids and has never talked to the parent: start over and let them claim it.
+        d.store.del('telegram_offset');
+        d.body.updateIdentity((id) => delete id.parent.telegram);
+      }
       await d.connectChannel(token);
       logEvent('control.telegram', { handle: r.handle });
       return r;
@@ -302,9 +317,10 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
       return {
         ...st,
         mandate: mandateView(),
+        mandateIntact: mandateView()?.intact ?? true,
         spentThisMonthCents: d.store.spentThisMonthCents(),
         frozen: d.store.get('frozen') === '1',
-        spend: d.store.spendRows().slice(0, 20),
+        spend: [...d.store.spendRows()].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 20),
         categories: Object.entries(CATEGORY_LABELS).map(([id, label]) => ({ id, label, blocked: BLOCKED.includes(id) })),
       };
     }
@@ -359,6 +375,12 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
 
     // ----- workers, parent -----
     if (p === '/v1/control/workers' && get) return { workers: workersView() };
+    if (p === '/v1/control/workers/detect' && post) {
+      const { added } = addWorkers(d.body, d.secrets);
+      logEvent('control.workers.detect', { added });
+      if (added.length) notify(`🛠 你在控制台给我加了 ${added.length} 个 worker：${added.join('、')}`);
+      return { added, workers: workersView() };
+    }
     if (seg[2] === 'workers' && seg.length === 4 && post) {
       const wid = decodeURIComponent(seg[3]);
       const all = d.body.workers();
@@ -376,8 +398,8 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
     if (p === '/v1/control/parent' && post) {
       let legal = undefined as Parameters<typeof setParent>[1]['legal'];
       if (body.legal && typeof body.legal === 'object') {
-        if (body.consent !== true) throw new HttpError(400, '登记人信息要你同意才能存');
         const l = body.legal as Record<string, unknown>;
+        if (body.consent !== true && !(typeof l.consentAt === 'string' && l.consentAt)) throw new HttpError(400, '登记人信息要你同意才能存');
         const a = (l.address ?? {}) as Record<string, unknown>;
         legal = {
           fullName: str(l.fullName, 'fullName', 200),
@@ -404,8 +426,14 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
     try {
       const body = await readJson(req);
       if (p === '/v1/control/login-code' && method === 'POST') {
-        // Only the parent's CLI (`vf ui`) holds the daemon token outside a worker; it trades it for a one-time code.
+        // Workers carry the daemon token too, so the token alone proves nothing: a person at this Mac has to click yes.
         if (!sameToken(bearer(req), d.daemonToken)) throw new HttpError(401, 'unauthorized');
+        const name = d.body.identity().name;
+        if (!(await parentConfirms(`打开 ${name} 的控制台？\n\n控制台能改它的资源、钱包和授权书。如果不是你刚运行了 vf ui，点"不允许"。`))) {
+          logEvent('control.login.denied', {});
+          notify('🛑 有进程想打开我的控制台，没得到允许。');
+          throw new HttpError(403, '这台 Mac 上没有人允许打开控制台');
+        }
         sendJson(res, 200, { code: d.sessions.issueCode() });
         return true;
       }

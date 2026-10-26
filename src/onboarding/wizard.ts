@@ -12,7 +12,7 @@ import { detectHarnesses, importOpencodeKey } from './detect.ts';
 import { install, STAY_AWAKE_ADVICE } from './launchd.ts';
 import { openRouterLogin } from './openrouterOAuth.ts';
 import { color as C, type Prompter } from './prompter.ts';
-import { birthAgent, connectBrain, connectTelegram, consentGiven, emailOptions, openEmail, openPhone, phoneOptions, setParent, signMandate, StepError, TIER_CANDIDATES, walletCheck } from './steps.ts';
+import { birthAgent, connectBrain, connectTelegram, consentGiven, emailOptions, openEmail, openPhone, phoneOptions, recordHarnesses, setParent, signMandate, StepError, TIER_CANDIDATES, walletCheck, workerCandidates } from './steps.ts';
 import { setupKeys, tail } from '../cli/keys.ts';
 
 export { testModel } from './steps.ts';
@@ -167,35 +167,7 @@ async function workers(ctx: Ctx): Promise<void> {
   const { p, body, secrets } = ctx;
   header(p, 'Lv1', '干活的 worker（harness × 模型）');
   const det = detectHarnesses();
-  const brains = body.identity().identities;
-  const okModels = (prov: Provider) => (brains[`brain_${prov}`]?.details?.models ?? {}) as Record<string, { ok: boolean }>;
-  const candidates: (WorkerSpec & { why: string })[] = [];
-  for (const prov of ['openrouter', 'anthropic', 'deepseek'] as Provider[]) {
-    if (!secrets.get(`${prov}_api_key`)) continue;
-    const cand = TIER_CANDIDATES[prov];
-    const ok = okModels(prov);
-    candidates.push({ id: `builtin-${prov}-cheap`, label: `便宜档 · ${cand.cheap.split(':')[1]}`, harness: 'builtin', model: cand.cheap, tier: 1, enabled: ok[cand.cheap]?.ok !== false, description: '便宜：重复性的杂活、查资料、整理', why: ok[cand.cheap]?.ok === false ? '测试没通过' : '' });
-    candidates.push({ id: `builtin-${prov}-mid`, label: `中档 · ${cand.mid.split(':')[1]}`, harness: 'builtin', model: cand.mid, tier: 2, enabled: ok[cand.mid]?.ok !== false, description: '日常任务：写东西、发邮件、用浏览器办事', why: ok[cand.mid]?.ok === false ? '测试没通过' : '' });
-  }
-  if (det.opencode.installed && det.opencode.providers.length) {
-    const prov = det.opencode.providers.includes('openrouter') ? 'openrouter' : det.opencode.providers[0];
-    const model = prov === 'openrouter' ? 'openrouter/deepseek/deepseek-v4.1-flash' : `${prov}/default`;
-    candidates.push({ id: 'opencode-deepseek', label: `OpenCode · ${model.split('/').slice(1).join('/')}`, harness: 'opencode', model, tier: 1, enabled: true, description: 'OpenCode harness，便宜模型，适合批量杂活', why: '' });
-  }
-  if (det.dsh.installed && (secrets.get('openrouter_api_key') || secrets.get('deepseek_api_key'))) {
-    const model = secrets.get('openrouter_api_key') ? 'openrouter/deepseek/deepseek-v4.1-flash' : 'deepseek/deepseek-v4-flash';
-    candidates.push({ id: 'deepseek-harness', label: `DeepSeek Harness（官方 dsh）· ${model.split('/').slice(-1)[0]}`, harness: 'dsh', model, tier: 1, enabled: true, description: 'DeepSeek 官方的 agent harness，便宜，适合杂活和网页任务', why: '' });
-  }
-  if (det.codewhale.installed && (secrets.get('openrouter_api_key') || secrets.get('deepseek_api_key'))) {
-    const model = secrets.get('openrouter_api_key') ? 'openrouter/deepseek/deepseek-v4.1-flash' : 'deepseek/deepseek-v4-flash';
-    candidates.push({ id: 'codewhale-deepseek', label: `Codewhale · ${model.split('/').slice(-1)[0]}`, harness: 'codewhale', model, tier: 1, enabled: true, description: 'DeepSeek 专用 harness（Codewhale），便宜，适合杂活和网页任务', why: '' });
-  }
-  if (det.claude.installed) {
-    candidates.push({ id: 'claude-code', label: '最强档 · Claude Code (Opus)', harness: 'claude-code', model: 'opus', tier: 3, enabled: det.claude.loggedIn, description: '最难的任务：复杂的多步操作、写代码、难搞的网站', why: det.claude.loggedIn ? '' : '还没登录：运行 claude auth login' });
-  }
-  if (det.codex.works) {
-    candidates.push({ id: 'codex', label: 'Codex', harness: 'codex', tier: 3, enabled: false, description: 'OpenAI Codex CLI', why: '' });
-  }
+  const candidates = workerCandidates(body, secrets, det);
   if (!candidates.length) p.say(C.red('还没有可用的模型或 harness。先完成"大脑"这一步，或者装好 Claude Code / OpenCode。'));
   const chosen: WorkerSpec[] = [];
   for (const c of candidates) {
@@ -204,19 +176,7 @@ async function workers(ctx: Ctx): Promise<void> {
     chosen.push({ ...spec, enabled: on });
   }
   body.saveWorkers(chosen);
-  const now = new Date().toISOString();
-  if (det.opencode.installed) {
-    body.setIdentityRecord('harness_opencode', { status: det.opencode.providers.length ? 'open' : 'needs-parent', value: det.opencode.providers.join(', ') || undefined, provider: 'OpenCode', openedBy: 'parent', openedAt: now, note: det.opencode.providers.length ? undefined : 'opencode auth login' });
-  }
-  if (det.dsh.installed) {
-    body.setIdentityRecord('harness_deepseek', { status: 'open', value: 'dsh', provider: 'DeepSeek', openedBy: 'parent', openedAt: now });
-  }
-  if (det.codewhale.installed) {
-    body.setIdentityRecord('harness_codewhale', { status: 'open', value: 'codewhale', provider: 'Codewhale', openedBy: 'parent', openedAt: now });
-  }
-  if (det.claude.installed) {
-    body.setIdentityRecord('harness_claude_code', { status: det.claude.loggedIn ? 'open' : 'needs-parent', value: det.claude.loggedIn ? det.claude.detail : undefined, provider: 'Anthropic', openedBy: 'parent', openedAt: now, note: det.claude.loggedIn ? undefined : 'claude auth login' });
-  }
+  recordHarnesses(body, det);
   p.say(`${C.green('✔')} ${chosen.filter((w) => w.enabled).length} 个 worker 待命。谁来干由 router 按 routing.md 决定，你也可以在任务里点名。`);
   body.markLevel('workers');
 }

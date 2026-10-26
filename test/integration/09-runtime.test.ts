@@ -246,11 +246,23 @@ describe('runtime: the parent borrows the browser, services reload live, codes s
     assert.ok((await w.daemon!.services.recentCodes('not a date')).some((c) => c.code === '731942'));
   });
 
-  it('pay() refuses a mandate edited on disk — even with a recomputed hash — and tells the parent', async () => {
+  it('a mandate edited on disk never counts: the guard restores it, and without the guard pay() refuses it, even with a recomputed hash', async () => {
     const file = path.join(w.home, 'agents', 'fox', 'mandate.json');
     const original = fs.readFileSync(file, 'utf8');
     const spendBefore = w.daemon!.store.spendRows().length;
     const tryPay = () => api.op<{ status: string; reason?: string }>('/v1/pay', { merchantName: 'Coffee Beans Co', merchantUrl: 'https://beans.example', amountCents: 500, context: 'Coffee beans for the office', test: true });
+    // First line: the guard puts the signed mandate back before pay() even reads it, and tells the parent.
+    const raised = JSON.parse(original) as Mandate;
+    raised.perTransactionLimitCents = 1_000_000;
+    fs.writeFileSync(file, JSON.stringify(raised, null, 2));
+    const big = await api.op<{ status: string; reason?: string }>('/v1/pay', { merchantName: 'Coffee Beans Co', merchantUrl: 'https://beans.example', amountCents: 50_000, context: 'A very large coffee order', test: true });
+    assert.equal(big.status, 'refused');
+    assert.match(String(big.reason), /单笔上限/, 'judged by the signed limits, not the edited ones');
+    assert.equal(fs.readFileSync(file, 'utf8'), original);
+    await w.waitBot((msg) => msg.text.includes('🛡') && msg.text.includes('mandate.json'));
+
+    // Second line, with the guard out of the way: pay() itself refuses a mandate whose hash or signature is off.
+    w.daemon!.guard.stop();
     try {
       // Someone raises the allowance by hand.
       const m = JSON.parse(original) as Mandate;
@@ -279,6 +291,7 @@ describe('runtime: the parent borrows the browser, services reload live, codes s
       assert.ok(w.events().some((e) => e.type === 'pay.check' && e.tampered === true));
     } finally {
       fs.writeFileSync(file, original);
+      w.daemon!.guard.start();
     }
     // The real, signed mandate still works.
     const ok = await tryPay();

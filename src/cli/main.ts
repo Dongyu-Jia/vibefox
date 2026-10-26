@@ -86,6 +86,13 @@ export async function main(argv: string[]): Promise<void> {
         if (ids?.email?.status === 'open' && ids.phone?.status === 'open' && !flags.new) return openControlPlane();
         return runSetupInBrowser();
       }
+      const running = currentAgentSlug() ? path.join(agentsDir(), currentAgentSlug()!, 'daemon.json') : undefined;
+      if (running && fs.existsSync(running) && !flags.step?.toString().includes('birth')) {
+        const info = JSON.parse(fs.readFileSync(running, 'utf8')) as { url: string };
+        if (await fetch(`${info.url}/v1/health`).then((r) => r.ok).catch(() => false)) {
+          throw new Error('它正在运行：改它的身份和资源请用 vf ui（控制台）。真要用终端向导，先 vf stop。');
+        }
+      }
       const { runWizard, STEPS } = await import('../onboarding/wizard.ts');
       const { TerminalPrompter, ScriptedPrompter } = await import('../onboarding/prompter.ts');
       const answers = flags.answers ? JSON.parse(fs.readFileSync(String(flags.answers), 'utf8')) as Record<string, unknown> : undefined;

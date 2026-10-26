@@ -37,7 +37,7 @@ export interface World {
   close(): Promise<void>;
 }
 
-const ENV_KEYS = ['VF_HOME', 'VF_AGENT', 'VF_SECRETS', 'VF_KEYS_FILE', 'VF_LLM_TAG_HEADER', 'VF_LINK_CLI', 'VF_MOCK_LINK_STATE', 'PATH', 'VF_DAEMON_PORT', 'VF_EXPLORATION_RATE', 'VF_CALL_POLL_SEC', 'VF_BROWSER_RECORD', 'VF_LOGS_DIR', 'XDG_DATA_HOME'];
+const ENV_KEYS = ['VF_HOME', 'VF_AGENT', 'VF_SECRETS', 'VF_KEYS_FILE', 'VF_CONTROL_CONFIRM', 'VF_LLM_TAG_HEADER', 'VF_LINK_CLI', 'VF_MOCK_LINK_STATE', 'PATH', 'VF_DAEMON_PORT', 'VF_EXPLORATION_RATE', 'VF_CALL_POLL_SEC', 'VF_BROWSER_RECORD', 'VF_LOGS_DIR', 'XDG_DATA_HOME'];
 
 export async function createWorld(opts: { workers?: 'builtin' | 'all'; answers?: Record<string, unknown>; keep?: string; record?: boolean } = {}): Promise<World> {
   const saved: Record<string, string | undefined> = {};
@@ -50,6 +50,8 @@ export async function createWorld(opts: { workers?: 'builtin' | 'all'; answers?:
   process.env.VF_SECRETS = 'file';
   // Never read the developer's real key file (.env.local) in tests.
   process.env.VF_KEYS_FILE = path.join(home, 'keys.env');
+  // Nobody is at the screen to click "打开控制台" in a test.
+  process.env.VF_CONTROL_CONFIRM = 'auto';
   process.env.VF_LLM_TAG_HEADER = '1';
   process.env.VF_LINK_CLI = path.join(mockBin, 'link-cli');
   process.env.VF_MOCK_LINK_STATE = path.join(home, 'link-state.json');

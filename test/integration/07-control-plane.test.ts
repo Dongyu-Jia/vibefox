@@ -106,6 +106,14 @@ describe('the control plane: the parent’s local UI', () => {
     assert.equal((await call(w.daemon!.url, '/v1/control/session', { body: { code: c.code } })).status, 401, 'a code works once');
     assert.equal((await call(w.daemon!.url, '/v1/control/login-code', { method: 'POST' })).status, 401);
     await w.waitBot((m) => m.text.includes('打开了我的控制台'));
+    // The daemon token is in every worker's env: on its own it must not open the control plane.
+    process.env.VF_CONTROL_CONFIRM = 'deny';
+    try {
+      assert.equal((await call(w.daemon!.url, '/v1/control/login-code', { method: 'POST', token: w.daemon!.token })).status, 403, 'nobody at the screen said yes');
+    } finally {
+      process.env.VF_CONTROL_CONFIRM = 'auto';
+    }
+    await w.waitBot((m) => m.text.includes('想打开我的控制台'));
   });
 
   it('the overview says what it still needs, with its own email and number', async () => {
@@ -177,10 +185,23 @@ describe('the control plane: the parent’s local UI', () => {
     assert.equal(d.body.identity().name, 'Fox');
     assert.ok(fs.readdirSync(path.join(root, 'tampered')).some((f) => f.endsWith('identity.json')), 'the altered version is kept as evidence');
     // As if a shell removed a credential from the agent's secret store behind the daemon's back.
-    openSecrets('fox', d.body.paths.secretsFile).delete('res.github.token');
+    const shell = openSecrets('fox', d.body.paths.secretsFile);
+    shell.delete('res.github.token');
     assert.deepEqual(d.guard.checkSecrets(), ['res.github.token']);
     assert.equal(d.resources.secret('github', 'token'), 'ghp_fulltoken0000000000000000000000000000');
+    shell.set('res.github.token', 'ghp_swapped00000000000000000000000000000');
+    assert.deepEqual(d.guard.checkSecrets(), ['res.github.token'], 'a swapped credential is put back too');
+    assert.equal(d.resources.secret('github', 'token'), 'ghp_fulltoken0000000000000000000000000000');
     await w.waitBot((m) => m.text.includes('🛡') && m.text.includes('resources.json'));
+
+    // Edit the file and append right away, before any timer runs: the daemon checks before it reads.
+    const list = JSON.parse(fs.readFileSync(resourcesFile, 'utf8'));
+    list.resources = list.resources.filter((r: { id: string }) => r.id !== 'github');
+    fs.writeFileSync(resourcesFile, JSON.stringify(list));
+    const appended = await call(d.url, '/v1/resources', { token: d.token, body: { kind: 'github', id: 'github', label: 'mine now' } });
+    assert.equal(appended.status, 409, 'the parent’s github is back before the existence check');
+    assert.equal(d.resources.get('github')?.origin, 'parent');
+    assert.deepEqual(d.resources.workerEnv().GITHUB_TOKEN, 'ghp_fulltoken0000000000000000000000000000', 'workers only ever get the parent’s credential');
   });
 
   it('signup help: a strong password saved before signup, and the codes it receives show up live', async () => {
@@ -197,6 +218,12 @@ describe('the control plane: the parent’s local UI', () => {
       return r.json.items?.find((i: { code?: string }) => i.code === '482913');
     }, 10_000);
     assert.equal(codes.channel, 'sms');
+    const again = await call(d.url, '/v1/control/resources/draft', { token, body: { kind: 'google' } });
+    assert.equal(again.json.resource.id, draft.json.resource.id, 'one draft per signup, not a pile of them');
+    assert.notEqual(again.json.password, draft.json.password);
+    const cf = await call(d.url, '/v1/control/resources/draft', { token, body: { kind: 'cloudflare' } });
+    assert.equal(cf.status, 200, 'kinds handed over by token still get a saved account password');
+    await call(d.url, `/v1/control/resources/${cf.json.resource.id}/delete`, { method: 'POST', token });
     const done = await call(d.url, `/v1/control/resources/${draft.json.resource.id}`, { token, body: { handle: 'fox.agent@gmail.com', status: 'ok', method: 'password' } });
     assert.equal(done.json.resource.status, 'ok');
     assert.equal(done.json.resource.handle, 'fox.agent@gmail.com');
@@ -237,6 +264,7 @@ describe('the control plane: the parent’s local UI', () => {
       return r.json.authenticated ? r.json : undefined;
     }, 15_000);
     assert.equal(wallet.mandate.intact, true);
+    assert.equal(wallet.mandateIntact, true);
     assert.ok(wallet.categories.some((c: { id: string; blocked: boolean }) => c.id === 'crypto' && c.blocked));
   });
 
@@ -255,9 +283,14 @@ describe('the control plane: the parent’s local UI', () => {
     const legal = { fullName: 'Test Parent', email: 'parent@example.com', phone: '+14155550100', address: { line1: '123 Test St', city: 'Testville', postalCode: '00000', country: 'US' } };
     assert.equal((await call(d.url, '/v1/control/parent', { token, body: { legal } })).status, 400);
     assert.equal((await call(d.url, '/v1/control/parent', { token, body: { legal, consent: true } })).status, 200);
+    assert.equal((await call(d.url, '/v1/control/parent', { token, body: { legal: { ...legal, consentAt: new Date().toISOString() } } })).status, 200, 'the UI’s tick box');
     const read = await call(d.url, '/v1/parent/legal', { token: d.token, body: {} });
     assert.equal(read.json.legal.fullName, 'Test Parent');
     assert.ok(read.json.legal.consentAt);
+    for (const p of ['/v1/identity', '/v1/identity/summary']) {
+      const shared = JSON.stringify((await call(d.url, p, { token: d.token })).json);
+      assert.ok(!shared.includes('123 Test St') && !shared.includes('userInfo'), `${p} keeps the registrant address and Link account to the parent`);
+    }
   });
 
   it('birth in the browser needs only a name, its own email and its own number', async () => {
@@ -301,6 +334,15 @@ describe('the control plane: the parent’s local UI', () => {
       const ov = await call(second!.url, '/v1/control/overview', { token: sess.json.token });
       assert.equal(ov.json.agent.email, 'pip-test@agentmail.to');
       assert.equal(ov.json.ready.channel, false, 'no chat channel yet — that comes later');
+      assert.equal(ov.json.steps.find((s: { id: string }) => s.id === 'workers').done, false);
+      const brain = await call(second!.url, '/v1/control/brain', { token: sess.json.token, body: { provider: 'openrouter', key: w.llm.key } });
+      assert.equal(brain.json.ok, true);
+      const ws = await call(second!.url, '/v1/control/workers', { token: sess.json.token });
+      assert.ok(ws.json.workers.some((x: { id: string; enabled: boolean }) => x.id === 'builtin-openrouter-cheap' && x.enabled), 'a brain comes with workers that use it');
+      const det = await call(second!.url, '/v1/control/workers/detect', { token: sess.json.token, body: {} });
+      assert.equal(det.status, 200);
+      const ov2 = await call(second!.url, '/v1/control/overview', { token: sess.json.token });
+      assert.equal(ov2.json.steps.find((s: { id: string }) => s.id === 'workers').done, true);
     } finally {
       await setup.close();
       await second?.stop();

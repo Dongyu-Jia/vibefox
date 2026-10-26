@@ -72,6 +72,15 @@ export async function startSetupServer(opts: SetupOptions): Promise<SetupServer>
     if (p === '/v1/setup/birth' && post) {
       const name = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 60) : 'Fox';
       const parentName = typeof b.parentName === 'string' && b.parentName.trim() ? b.parentName.trim().slice(0, 60) : 'parent';
+      if (body) {
+        // Already born in this setup (it may have an inbox and a number by now): a new name is just a new name.
+        body.updateIdentity((id) => {
+          id.name = name;
+          id.parent.name = parentName;
+        });
+        logEvent('setup.renamed', { slug: body.slug });
+        return { agent: state().agent };
+      }
       body = await bornAgent({ name, parentName, configOverrides: opts.configOverrides });
       configureLogs(body.paths.logs);
       secrets = openSecrets(body.slug, body.paths.secretsFile);

@@ -18,7 +18,7 @@ import { parseArgs } from '../../src/cli/main.ts';
 import { formatSnapshot } from '../../src/browser/service.ts';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { KeyFileStore } from '../../src/core/secrets.ts';
+import { decodeKeychainValue, encodeKeychainValue, KeyFileStore } from '../../src/core/secrets.ts';
 import { PROJECT_ROOT } from '../../src/core/paths.ts';
 
 const mandate: Mandate = {
@@ -107,6 +107,18 @@ describe('audit log redaction', () => {
     assert.equal(redactString('card 4242424242424242 ok'), 'card •••• 4242 ok');
     assert.equal(redactString('ts 1729771234567 phone +14155550100'), 'ts 1729771234567 phone +14155550100');
     assert.deepEqual(redact({ authorization: 'Bearer x', card: { number: '4000009990001984', cvc: '100' }, key: 'k' }), { authorization: '[REDACTED]', card: { number: '•••• 1984', cvc: '[REDACTED]' }, key: '[REDACTED]' });
+  });
+});
+
+describe('secrets in the keychain', () => {
+  it('a multi-line value (a GCP key) survives security -i, single-line values are unchanged', () => {
+    const json = '{\n  "type": "service_account",\n  "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n"\n}';
+    const stored = encodeKeychainValue(json);
+    assert.ok(!/[\r\n]/.test(stored));
+    assert.equal(decodeKeychainValue(stored), json);
+    assert.equal(encodeKeychainValue('sk-or-v1-abc'), 'sk-or-v1-abc');
+    assert.equal(decodeKeychainValue('sk-or-v1-abc'), 'sk-or-v1-abc');
+    assert.equal(decodeKeychainValue(encodeKeychainValue('vf-b64:looks-like-the-marker')), 'vf-b64:looks-like-the-marker');
   });
 });
 

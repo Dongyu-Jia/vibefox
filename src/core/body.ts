@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { noteWrite } from './writes.ts';
+import { noteRead, noteWrite } from './writes.ts';
 import path from 'node:path';
 import { bodyPaths, bodyRoot, ensureBodyDirs, type BodyPaths } from './paths.ts';
 
@@ -186,6 +186,7 @@ router 每次派活前都会读这个文件。规则用自然语言写，优先�
 // ---------- body ----------
 
 function readJson<T>(file: string): T | undefined {
+  noteRead(file);
   if (!fs.existsSync(file)) return undefined;
   return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
 }

@@ -25,6 +25,19 @@ export const SECRET_NAMES = [
   'daemon_token',
 ] as const;
 
+/**
+ * `security -i` reads one command per line, so a value with a line break (a GCP
+ * service-account key) would be cut at the first one. Those go in as base64
+ * behind a marker; single-line values stay exactly as they were.
+ */
+const B64 = 'vf-b64:';
+export function encodeKeychainValue(value: string): string {
+  return /[\r\n]/.test(value) || value.startsWith(B64) ? B64 + Buffer.from(value, 'utf8').toString('base64') : value;
+}
+export function decodeKeychainValue(stored: string): string {
+  return stored.startsWith(B64) ? Buffer.from(stored.slice(B64.length), 'base64').toString('utf8') : stored;
+}
+
 function envOverride(name: string): string | undefined {
   return process.env[`VF_SECRET_${name.toUpperCase()}`] || undefined;
 }
@@ -40,12 +53,12 @@ class KeychainStore implements SecretStore {
     if (env) return env;
     const r = spawnSync('security', ['find-generic-password', '-s', this.service, '-a', name, '-w'], { encoding: 'utf8' });
     if (r.status !== 0) return undefined;
-    return r.stdout.replace(/\n$/, '') || undefined;
+    return decodeKeychainValue(r.stdout.replace(/\n$/, '')) || undefined;
   }
   set(name: string, value: string): void {
     // `security -i` reads the command from stdin so the secret never shows up in `ps`.
     const quoted = (s: string) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
-    const cmd = `add-generic-password -U -s ${quoted(this.service)} -a ${quoted(name)} -w ${quoted(value)}\n`;
+    const cmd = `add-generic-password -U -s ${quoted(this.service)} -a ${quoted(name)} -w ${quoted(encodeKeychainValue(value))}\n`;
     const r = spawnSync('security', ['-i'], { input: cmd, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`keychain write failed for ${name}: ${r.stderr}`);
   }
