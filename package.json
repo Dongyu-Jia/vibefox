@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test --test-concurrency=1 'test/unit/*.test.ts' 'test/integration/*.test.ts'",
     "test:unit": "node --test 'test/unit/*.test.ts'",
-    "test:integration": "node --test --test-concurrency=1 'test/integration/*.test.ts'"
+    "test:integration": "node --test --test-concurrency=1 'test/integration/*.test.ts'",
+    "secrets": "gitleaks git --config .gitleaks.toml --redact --no-banner"
   },
   "dependencies": {
     "@stripe/link-cli": "^0.30.0",

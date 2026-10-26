@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse to push anything gitleaks flags (rules: .gitleaks.toml). Enable once: git config core.hooksPath .githooks
+command -v gitleaks >/dev/null 2>&1 || { echo "pre-push: gitleaks is not installed (brew install gitleaks); refusing to push unchecked." >&2; exit 1; }
+gitleaks git --config .gitleaks.toml --redact --no-banner || { echo "pre-push: gitleaks found something that looks like a secret; not pushing." >&2; exit 1; }

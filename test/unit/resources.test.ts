@@ -254,7 +254,7 @@ describe('totp', () => {
   const RFC_SECRET = base32Encode(Buffer.from('12345678901234567890'));
 
   it('matches the RFC 6238 SHA-1 test vectors', () => {
-    assert.equal(RFC_SECRET, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+    assert.equal(RFC_SECRET, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'); // gitleaks:allow (test fixture, not a key)
     const vectors: [number, string][] = [
       [59, '94287082'],
       [1111111109, '07081804'],
@@ -732,7 +732,7 @@ describe('audit log redaction of provider tokens', () => {
     ['GitLab', 'glpat-' + 'Ab3_-xY9zQ'.repeat(2), 'glpat-<redacted>'],
     ['Hugging Face', 'hf_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz0123'.slice(0, 34), 'hf_<redacted>'],
     ['npm', 'npm_' + 'A1b2C3d4E5'.repeat(4).slice(0, 36), 'npm_<redacted>'],
-    ['Slack bot', 'xoxb-1234567890-0987654321-AbCdEfGhIjKl', 'xoxb-<redacted>'],
+    ['Slack bot', 'xoxb-1234567890-0987654321-AbCdEfGhIjKl', 'xoxb-<redacted>'], // gitleaks:allow (test fixture, not a key)
     ['Slack user', 'xoxp-1234567890-0987654321-AbCdEfGhIjKl', 'xoxp-<redacted>'],
     ['Stripe live secret', 'sk_live_' + 'a'.repeat(24), 'sk_live_<redacted>'],
     ['Stripe test secret', 'sk_test_' + 'a'.repeat(24), 'sk_test_<redacted>'],
@@ -755,9 +755,9 @@ describe('audit log redaction of provider tokens', () => {
   it('PEM private keys, whole or cut off', () => {
     const pem = RSA_PRIVATE;
     const out = redactString(`key: ${pem} done`);
-    assert.equal(out, 'key: -----BEGIN PRIVATE KEY-----<redacted>-----END PRIVATE KEY-----\n done');
+    assert.equal(out, 'key: -----BEGIN PRIVATE KEY-----<redacted>-----END PRIVATE KEY-----\n done'); // gitleaks:allow (test fixture, not a key)
     const rsa = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----';
-    assert.equal(redactString(rsa), '-----BEGIN RSA PRIVATE KEY-----<redacted>-----END RSA PRIVATE KEY-----');
+    assert.equal(redactString(rsa), '-----BEGIN RSA PRIVATE KEY-----<redacted>-----END RSA PRIVATE KEY-----'); // gitleaks:allow (test fixture, not a key)
     assert.equal(redactString('{"private_key":"-----BEGIN PRIVATE KEY-----\\nMIIEv'), '{"private_key":"-----BEGIN PRIVATE KEY-----<redacted>');
     const json = JSON.stringify(SERVICE_ACCOUNT);
     assert.ok(!redactString(json).includes(RSA_PRIVATE.split('\n')[1]));

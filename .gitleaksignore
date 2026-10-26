@@ -1,0 +1,5 @@
+# Test fixtures in an earlier commit (RFC 6238 vector, a made-up Slack token, truncated fake PEM headers) — not keys.
+159c6309713fd96bf2099519afe330dee0c1d690:test/unit/resources.test.ts:slack-bot-token:735
+159c6309713fd96bf2099519afe330dee0c1d690:test/unit/resources.test.ts:generic-api-key:257
+159c6309713fd96bf2099519afe330dee0c1d690:test/unit/resources.test.ts:private-key:758
+159c6309713fd96bf2099519afe330dee0c1d690:test/unit/resources.test.ts:private-key:760

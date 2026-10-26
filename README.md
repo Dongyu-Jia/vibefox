@@ -54,6 +54,8 @@ node scripts/dsh-browser-check.ts          # 官方 DeepSeek Harness 在真实�
 
 录屏和检查脚本另外需要 `ffmpeg`、`vhs`，以及你想测的 harness（`dsh`、`claude`、`opencode`）。
 
+提交前查密钥：`brew install gitleaks`，然后 `git config core.hooksPath .githooks`（push 前自动跑 `npm run secrets`，发现像密钥的东西就不让推）。
+
 集成测试在本地起 Telegram、AgentMail、AgentPhone、OpenRouter 的替身服务和一个网站，再用假的 `link-cli`、`claude`、`opencode` 跑通所有路径——不花钱、不需要账号。`scripts/live-check.ts` 打真实服务。
 
 ## 项目结构
