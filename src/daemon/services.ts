@@ -304,7 +304,8 @@ export class Services {
       const code = data.code ?? (r.classification === 'code' ? extractCode(`${r.subject ?? ''} ${r.body}`) : undefined);
       const link = r.source === 'email' ? (data.link ?? verificationLink(r.body)) : undefined;
       if (!code && !link) continue;
-      out.push({ ms, at: r.received_at, channel: r.source as RecentCode['channel'], from: r.sender, ...(r.subject ? { subject: r.subject } : {}), ...(code ? { code } : {}), ...(link ? { link } : {}) });
+      const subject = r.subject ?? (r.source === 'sms' ? r.body.slice(0, 200) : undefined);
+      out.push({ ms, at: r.received_at, channel: r.source as RecentCode['channel'], from: r.sender, ...(subject ? { subject } : {}), ...(code ? { code } : {}), ...(link ? { link } : {}) });
     }
     return out
       .sort((a, b) => b.ms - a.ms)

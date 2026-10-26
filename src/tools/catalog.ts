@@ -184,6 +184,51 @@ export const TOOLS: ToolSpec[] = [
     run: async (c) => text(await c.get('/v1/identity/summary')),
   },
   {
+    name: 'resources',
+    description: 'Your resources: accounts, tokens, cloud projects, the wallet… with origin (given by the parent / made by you), access and status. Read-only for you.',
+    parameters: obj({}),
+    async run(c) {
+      const { resources } = await c.get<{ resources: { id: string; label: string; handle?: string; origin: string; access: string; status: string; method: string; secretFields: string[] }[] }>('/v1/resources');
+      if (!resources.length) return 'No resources yet.';
+      return resources
+        .map((r) => `${r.id}: ${r.label}${r.handle ? ` (${r.handle})` : ''} · ${r.origin === 'self' ? 'made by you' : 'given by the parent'} · ${r.access} · ${r.status}${r.secretFields.length ? ` · fields: ${r.secretFields.join(', ')}` : ''}${r.method === 'browser' ? ' · signed in in your browser' : ''}`)
+        .join('\n');
+    },
+  },
+  {
+    name: 'resource_get',
+    description: 'Read one credential field of a resource (e.g. token, password, login) when a task needs it. Every read is audited.',
+    parameters: obj({ id: str('Resource id from `resources`'), field: str('Field, e.g. token or password (default: the first secret field)') }, ['id']),
+    run: async (c, a) => (await c.post<{ value: string }>(`/v1/resources/${encodeURIComponent(String(a.id))}/secret`, { field: a.field, runId: c.runId, taskId: c.taskId })).value,
+  },
+  {
+    name: 'resource_otp',
+    description: 'The current two-step (TOTP) code for a resource the parent gave you with a two-step key.',
+    parameters: obj({ id: str('Resource id') }, ['id']),
+    run: async (c, a) => (await c.post<{ code: string }>(`/v1/resources/${encodeURIComponent(String(a.id))}/otp`, { runId: c.runId })).code,
+  },
+  {
+    name: 'resource_add',
+    description: 'Record a resource you created yourself (a repo, a deployment, a database, a domain…), ideally with the resource it was built on as parent. You cannot change or remove existing resources.',
+    parameters: obj({ kind: str('Catalog kind, e.g. github, supabase, domain, custom'), label: str('What it is'), handle: str('Its name/URL/id'), parent: str('Id of the resource it was built on'), note: str('Anything worth knowing') }, ['kind', 'label']),
+    run: async (c, a) => text((await c.post<{ resource: unknown }>('/v1/resources', { kind: a.kind, label: a.label, handle: a.handle, parent: a.parent, note: a.note, taskId: c.taskId })).resource),
+  },
+  {
+    name: 'resource_request',
+    description: 'Ask the parent for a root only a human can give: a signup on a human-only platform, money, or legal identity. They get a Telegram message pointing to the control plane.',
+    parameters: obj({ kind: str('Catalog kind, e.g. cloudflare, github, stripe'), why: str('What you need it for, in the parent’s language') }, ['kind', 'why']),
+    async run(c, a) {
+      await c.post('/v1/resources/request', { kind: a.kind, why: a.why, taskId: c.taskId });
+      return 'asked the parent';
+    },
+  },
+  {
+    name: 'parent_legal',
+    description: "The parent's registrant details (name, address, email, phone) — only for registrations that legally need a registrant, such as a domain. Audited.",
+    parameters: obj({}),
+    run: async (c) => text((await c.post<{ legal: unknown }>('/v1/parent/legal', { runId: c.runId, taskId: c.taskId })).legal ?? 'The parent has not given registrant details yet; use resource_request with kind "legal".'),
+  },
+  {
     name: 'remember',
     description: 'Save a fact to your long-term memory.',
     parameters: obj({ fact: str('The fact') }, ['fact']),

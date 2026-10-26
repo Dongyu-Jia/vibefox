@@ -6,6 +6,7 @@ import { logEvent } from '../core/log.ts';
 import { VF_BIN, vfRoot } from '../core/paths.ts';
 import type { SecretStore } from '../core/secrets.ts';
 import type { Run, Store, Task } from '../core/store.ts';
+import type { Resources } from '../resources/store.ts';
 import { taskPrompt, workerSystemPrompt } from './brief.ts';
 import { builtinHarness } from './harness/builtin.ts';
 import { claudeCodeHarness } from './harness/claudeCode.ts';
@@ -34,6 +35,8 @@ export interface ManagerDeps {
   timeoutMinutes: number;
   /** Lets external harnesses use the agent's own model keys instead of whatever their global config holds. */
   secrets?: SecretStore;
+  /** The agent's resources: listed in the brief, and tokens with an env name (GITHUB_TOKEN…) handed to the worker. */
+  resources?: Resources;
   onProgress: (runId: string, text: string) => void;
   onExit: (runId: string, exit: HarnessExit, intentional: boolean) => void;
 }
@@ -68,7 +71,7 @@ export class WorkerManager {
     const workspace = this.workspaceFor(task);
     fs.mkdirSync(workspace, { recursive: true });
 
-    const systemPrompt = workerSystemPrompt(body);
+    const systemPrompt = workerSystemPrompt(body, this.deps.resources?.list());
     const prompt = opts.resumeSession && opts.extraPrompt ? opts.extraPrompt : taskPrompt(store, store.task(task.id)!, opts.extraPrompt);
     fs.writeFileSync(path.join(workspace, 'AGENTS.md'), systemPrompt);
     fs.writeFileSync(path.join(workspace, 'TASK.md'), prompt);
@@ -91,7 +94,7 @@ export class WorkerManager {
     fs.writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { vibefox: { command: mcpCommand[0], args: mcpCommand.slice(1), env: vfEnv } } }, null, 2), { mode: 0o600 });
     // Both hold the daemon token; `mode` only applies when a file is created (a retry reuses the workspace).
     for (const f of [runFile, mcpConfigPath]) fs.chmodSync(f, 0o600);
-    const harnessEnv: Record<string, string> = {};
+    const harnessEnv: Record<string, string> = { ...(this.deps.resources?.workerEnv() ?? {}) };
     if (spec.harness === 'opencode') {
       const config: Record<string, unknown> = { $schema: 'https://opencode.ai/config.json', mcp: { vibefox: { type: 'local', command: mcpCommand, environment: vfEnv, enabled: true } } };
       // Use the agent's own OpenRouter key (via env, never written to disk), not OpenCode's global one.

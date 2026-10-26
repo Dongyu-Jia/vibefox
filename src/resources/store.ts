@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { noteWrite } from '../core/writes.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Body } from '../core/body.ts';
@@ -111,8 +112,10 @@ export class Resources {
     const data: ResourcesFile = { version: 1, resources: list };
     const tmp = path.join(path.dirname(this.file), `.resources.json.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+    const content = JSON.stringify(data, null, 2) + '\n';
+    fs.writeFileSync(tmp, content, { mode: 0o600 });
     fs.renameSync(tmp, this.file);
+    noteWrite(this.file, content);
   }
 
   list(): Resource[] {

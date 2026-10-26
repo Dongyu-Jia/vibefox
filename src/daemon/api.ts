@@ -2,11 +2,16 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import type { BrowserService } from '../browser/service.ts';
-import type { Body } from '../core/body.ts';
+import { shareableIdentity, type Body } from '../core/body.ts';
 import { logEvent } from '../core/log.ts';
 import { shortId, type Store } from '../core/store.ts';
 import { IDENTITY_KINDS, OPENER_LABEL } from '../identity/registry.ts';
 import { openSelfIdentities } from '../identity/selfmade.ts';
+import { errorStatus } from '../control/errors.ts';
+import { gate, HttpError, readJson, sameToken, bearer, sendJson, serveUi } from '../control/http.ts';
+import { identityViews, resourceView } from '../control/routes.ts';
+import { resourceKind } from '../resources/catalog.ts';
+import type { Resources } from '../resources/store.ts';
 import type { Router } from '../router/router.ts';
 import type { Services } from './services.ts';
 
@@ -23,6 +28,9 @@ export interface ApiDeps {
   services: Services;
   browser: BrowserService;
   token: string;
+  resources: Resources;
+  /** `/v1/control/*` and its own parent-session auth (see src/control/routes.ts). */
+  control?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<boolean>;
 }
 
 interface Op {
@@ -31,14 +39,6 @@ interface Op {
   error?: string;
   note?: string;
   waiters: (() => void)[];
-}
-
-class HttpError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
 }
 
 export function createApi(deps: ApiDeps): http.Server {
@@ -116,7 +116,7 @@ export function createApi(deps: ApiDeps): http.Server {
 
     if (p === '/v1/health') return { ok: true };
     if (p === '/v1/status') return { text: await router.statusSummary(), tasks: store.activeTasks() };
-    if (p === '/v1/identity') return deps.body.identity();
+    if (p === '/v1/identity') return shareableIdentity(deps.body.identity());
     if (p === '/v1/identity/summary') return identitySummary();
     if (p === '/v1/identity/open' && method === 'POST') return { opened: openSelfIdentities(deps.body) };
     if (p === '/v1/mandate') return { mandate: deps.body.mandate(), spentThisMonthCents: store.spentThisMonthCents() };
@@ -145,6 +145,62 @@ export function createApi(deps: ApiDeps): http.Server {
       }
       if (action === 'supplements') return { supplements: store.takeSupplements(run.task_id, run.id) };
     }
+    // ---- the agent's resources (secrets only on explicit request, always audited) ----
+    if (p === '/v1/resources' && method === 'GET') return { resources: [...identityViews(deps.body), ...deps.resources.list().map((r) => resourceView(deps.resources, r))] };
+    if (p === '/v1/resources/request' && method === 'POST') {
+      const kind = resourceKind(String(body.kind ?? ''));
+      const why = String(body.why ?? '').slice(0, 600);
+      logEvent('resource.requested', { kind: body.kind, why, taskId: body.taskId });
+      await router.notifyParent(`🧩 我需要一个资源：<b>${kind?.label ?? String(body.kind)}</b>${why ? '\n' + why.replace(/[<>&]/g, '') : ''}\n\n在 Mac 上运行 <code>vf ui resources/add/${kind?.id ?? 'custom'}</code> 就能直接交给我。`);
+      return { ok: true };
+    }
+    if (p === '/v1/resources' && method === 'POST') {
+      const kind = resourceKind(String(body.kind ?? ''));
+      if (!kind) throw new HttpError(400, 'unknown resource kind; see vf resources --catalog');
+      // Workers may only append what they built themselves: never replace or edit an existing resource.
+      if (body.id && deps.resources.get(String(body.id))) throw new HttpError(409, `${String(body.id)} already exists; resources are read-only for workers`);
+      const r = deps.resources.add({
+        kind: kind.id,
+        id: body.id ? String(body.id) : undefined,
+        label: body.label ? String(body.label) : undefined,
+        handle: body.handle ? String(body.handle) : undefined,
+        parent: body.parent ? String(body.parent) : undefined,
+        note: body.note ? String(body.note) : undefined,
+        method: body.fields ? kind.methods[0] : 'none',
+        fields: body.fields && typeof body.fields === 'object' ? (body.fields as Record<string, string>) : {},
+        access: 'full',
+        origin: 'self',
+        addedBy: 'agent',
+        status: 'unverified',
+      });
+      logEvent('resource.self-added', { id: r.id, kind: kind.id, parent: r.parent, taskId: body.taskId });
+      deps.body.appendJournal(`- 我自己加了一个资源：${r.label}${r.handle ? ' ' + r.handle : ''}${r.parent ? `（建在 ${r.parent} 上）` : ''}`);
+      await router.notifyParent(`🧩 我自己加了一个资源：<b>${r.label.replace(/[<>&]/g, '')}</b>${r.handle ? ' ' + r.handle.replace(/[<>&]/g, '') : ''}${r.parent ? `（建在 ${r.parent} 上）` : ''}`);
+      return { resource: resourceView(deps.resources, r) };
+    }
+    if (seg[1] === 'resources' && seg[2] && method === 'POST') {
+      const id = decodeURIComponent(seg[2]);
+      const r = deps.resources.get(id);
+      if (!r) throw new HttpError(404, `no resource ${id}`);
+      if (seg[3] === 'secret') {
+        const field = String(body.field ?? r.secretFields[0] ?? '');
+        const value = deps.resources.secret(id, field);
+        logEvent('resource.secret.read', { id, field, found: Boolean(value), runId: body.runId, taskId: body.taskId });
+        if (!value) throw new HttpError(404, `${id} has no ${field}`);
+        return { value };
+      }
+      if (seg[3] === 'otp') {
+        const code = deps.resources.otp(id);
+        logEvent('resource.otp.read', { id, found: Boolean(code), runId: body.runId });
+        if (!code) throw new HttpError(404, `${id} has no two-step key`);
+        return { code };
+      }
+    }
+    if (p === '/v1/parent/legal') {
+      logEvent('parent.legal.read', { runId: body.runId, taskId: body.taskId });
+      return { legal: deps.body.identity().parent.legal ?? null };
+    }
+
     if (seg[1] === 'questions' && seg[2]) return waitQuestion(seg[2], wait);
     if (seg[1] === 'ops' && seg[2]) return waitOp(seg[2], wait);
 
@@ -230,25 +286,22 @@ export function createApi(deps: ApiDeps): http.Server {
   }
 
   return http.createServer(async (req, res) => {
+    if (!gate(req, res)) return;
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const send = (status: number, data: unknown) => {
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(data ?? null));
-    };
-    if (url.pathname !== '/v1/health' && req.headers.authorization !== `Bearer ${deps.token}`) return send(401, { error: 'unauthorized' });
-    let raw = '';
-    for await (const chunk of req) raw += chunk;
-    let body: Record<string, unknown> = {};
-    try {
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-      return send(400, { error: 'invalid json' });
+    const send = (status: number, data: unknown) => sendJson(res, status, data);
+    if (serveUi(req, res, url.pathname)) return;
+    if (url.pathname === '/v1/whoami') {
+      const id = deps.body.identity();
+      return send(200, { mode: 'control', agent: { name: id.name, slug: id.slug } });
     }
+    if (deps.control && (await deps.control(req, res, url))) return;
+    if (url.pathname !== '/v1/health' && !sameToken(bearer(req), deps.token)) return send(401, { error: 'unauthorized' });
     try {
+      const body = await readJson(req);
       const out = await route(req.method ?? 'GET', url, body);
       send(200, out);
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = errorStatus(err);
       logEvent('api.error', { path: url.pathname, status, error: String((err as Error).message) });
       send(status, { error: (err as Error).message });
     }

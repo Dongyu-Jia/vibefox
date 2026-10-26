@@ -8,7 +8,11 @@ import { Body } from '../core/body.ts';
 import { configureLogs, log, logEvent } from '../core/log.ts';
 import { openSecrets } from '../core/secrets.ts';
 import { Store } from '../core/store.ts';
+import { Guard } from '../control/guard.ts';
+import { Ops, Sessions } from '../control/http.ts';
+import { createControl } from '../control/routes.ts';
 import { resolveModel, usableModel, type ChatModel } from '../llm/index.ts';
+import { Resources } from '../resources/store.ts';
 import { Router } from '../router/router.ts';
 import { WorkerManager } from '../workers/manager.ts';
 import { createApi } from './api.ts';
@@ -26,6 +30,8 @@ export interface RunningDaemon {
   manager: WorkerManager;
   heartbeat: Heartbeat;
   channel: Channel;
+  resources: Resources;
+  guard: Guard;
   stop(): Promise<void>;
 }
 
@@ -79,14 +85,18 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
 
   const modelCache = new Map<string, ChatModel>();
   const routerModel = (): ChatModel | undefined => {
+    // Fresh config each time: the parent can give it a brain from the control plane while it runs.
+    const cfg = body.config();
     const low = store.get('budget_mode') === 'low';
-    const spec = usableModel(low ? config.voiceModel : config.router.model, low ? 'cheap' : 'mid', secrets);
+    const spec = usableModel(low ? cfg.voiceModel : cfg.router.model, low ? 'cheap' : 'mid', secrets);
     if (!spec) return undefined;
-    if (!modelCache.has(spec)) modelCache.set(spec, resolveModel(spec, config, secrets));
+    if (!modelCache.has(spec)) modelCache.set(spec, resolveModel(spec, cfg, secrets));
     return modelCache.get(spec);
   };
 
   const services = new Services(body, store, secrets);
+  const resources = new Resources(body, secrets);
+  let control: ReturnType<typeof createControl> | undefined;
   // Late-bound: the API needs the router and the router needs the manager, which needs the API URL.
   let router!: Router;
   const server = createApi({
@@ -98,9 +108,14 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
     services,
     browser,
     token,
-  } as never);
+    resources,
+    control: (req: http.IncomingMessage, res: http.ServerResponse, u: URL) => (control ? control(req, res, u) : Promise.resolve(false)),
+  });
   const port = await listen(server, opts.port ?? Number(process.env.VF_DAEMON_PORT ?? config.daemon.port));
   const url = `http://127.0.0.1:${port}`;
+  const ownOrigins = [url, `http://localhost:${port}`];
+  // A worker driving the agent's browser must never reach its own control plane.
+  browser.guardOrigin(ownOrigins);
 
   const manager = new WorkerManager({
     body,
@@ -109,6 +124,7 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
     apiToken: token,
     timeoutMinutes: config.workerTimeoutMinutes,
     secrets,
+    resources,
     onProgress: (runId, text) => router.onProgress(runId, text),
     onExit: (runId, exit, intentional) => router.onRunExit(runId, exit, intentional),
   });
@@ -117,11 +133,44 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
 
   fs.writeFileSync(body.paths.daemonJson, JSON.stringify({ url, token, pid: process.pid, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
 
+  let channelStarted = false;
   if (tgToken || opts.channel) {
     await channel.start((msg) => router.handleInbound(msg));
+    channelStarted = true;
   } else {
-    log('no Telegram token yet: the agent runs without a chat channel (vf init --step channel)');
+    log('no Telegram token yet: the agent runs without a chat channel (add one in `vf ui`)');
   }
+  control = createControl({
+    body,
+    store,
+    router,
+    services,
+    browser,
+    manager,
+    secrets,
+    resources,
+    daemonToken: token,
+    sessions: new Sessions(),
+    ops: new Ops(),
+    ownOrigins,
+    connectChannel: async (t) => {
+      if (channel instanceof TelegramChannel) channel.setToken(t);
+      if (!channelStarted) {
+        await channel.start((msg) => router.handleInbound(msg));
+        channelStarted = true;
+      }
+    },
+    onBrainChanged: () => modelCache.clear(),
+  });
+  // Identities and resources are read-only for workers; this puts them back if a shell changes them anyway.
+  const guard = new Guard({
+    body,
+    secrets,
+    resources,
+    notify: (text) => void router.notifyParent(text).catch(() => {}),
+    fileIntervalMs: Number(process.env.VF_GUARD_MS ?? 2000),
+  });
+  guard.start();
   services.start();
   await router.resumeInterrupted();
   const heartbeat = new Heartbeat(router, store, config);
@@ -133,12 +182,13 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
   const stop = async () => {
     if (stopped) return;
     stopped = true;
+    guard.stop();
     heartbeat.stop();
     await services.stop();
     await channel.stop();
     await manager.stopAll();
     router.dispose();
-    await browser.close();
+    await browser.shutdown();
     const closed = new Promise<void>((r) => server.close(() => r()));
     server.closeAllConnections();
     await closed;
@@ -147,5 +197,5 @@ export async function startDaemon(opts: { slug?: string; port?: number; channel?
     logEvent('daemon.stopped', {});
   };
 
-  return { url, token, body, store, router, services, browser, manager, heartbeat, channel, stop };
+  return { url, token, body, store, router, services, browser, manager, heartbeat, channel, resources, guard, stop };
 }

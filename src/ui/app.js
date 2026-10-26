@@ -836,15 +836,6 @@ function setupIdentity(ctx, cfg) {
   }
 
   function paint(focus) {
-    const skip = h('button', {
-      type: 'button',
-      class: 'link quiet',
-      text: '先跳过，之后在控制台里加',
-      onclick: () => {
-        ctx.skipped[cfg.id] = true;
-        ctx.next();
-      },
-    });
     fill(card,
       h('h2', { id: `setup-${cfg.id}-title`, tabindex: '-1', text: cfg.title }),
       h('p', { class: 'muted', text: cfg.intro }),
@@ -852,7 +843,7 @@ function setupIdentity(ctx, cfg) {
       keyRow(),
       L.usePreset && L.error ? h('p', { class: 'form-error', role: 'alert', text: L.error }) : null,
       options(),
-      current ? h('div', { class: 'actions' }, btn('不换，下一步', { kind: 'ghost', onClick: () => ctx.next(), trail: 'arrow' })) : h('div', { class: 'skip-row' }, skip),
+      current ? h('div', { class: 'actions' }, btn('不换，下一步', { kind: 'ghost', onClick: () => ctx.next(), trail: 'arrow' })) : null,
     );
     if (focus) ($('input[type=radio]:checked', card) || $('input', card))?.focus();
   }

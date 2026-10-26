@@ -176,6 +176,16 @@ export async function waitFor<T>(fn: () => T | undefined, timeoutMs = 10_000): P
   }
 }
 
+export async function waitForAsync<T>(fn: () => Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await fn();
+    if (v !== undefined) return v;
+    if (Date.now() > end) throw new Error(`waitFor timed out after ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
 export function strip(html: string): string {
   return html.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }

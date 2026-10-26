@@ -47,6 +47,13 @@
 | `src/daemon/` | 常驻进程：控制 API、身份服务（收信、收短信、打电话、付款）、心跳 |
 | `src/onboarding/` | 出生向导、OpenRouter OAuth PKCE、已有 harness 检测、launchd |
 | `src/mcp/` | `vf mcp`：MCP stdio 服务 |
+| `src/control/` | 本地 UI 的服务端：安全闸门（Host/Origin/CSP）、家长会话、控制台路由、`vf init` 的出生服务器、看守（guard） |
+| `src/ui/` | 本地 UI（纯 HTML/JS/CSS，无构建、无外部资源）：出生向导 + 控制台 |
+| `src/resources/` | 资源目录（谁来开、怎么给、能做什么、怎么验证）和资源清单（凭证在钥匙串，清单在 `resources.json`） |
+
+## 控制台
+
+`vf ui` 用 daemon token 换一次性码 → 浏览器打开 `127.0.0.1:<端口>/ui/#code=…` → 页面换成只在 daemon 内存里的家长会话。worker 的 token 进不了 `/v1/control/*`；worker 对身份和资源只读（`/v1/resources` 只能列、读凭证（审计）、追加自己建的）。`src/control/guard.ts` 记着 daemon 自己写的最后一份身份、资源、授权书、worker、配置和凭证，有人绕过 daemon 改了或删了就恢复并告诉家长。详见 [`CONTROL-PLANE.md`](CONTROL-PLANE.md)。
 
 ## 一次任务怎么走
 

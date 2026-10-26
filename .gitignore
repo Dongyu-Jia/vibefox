@@ -21,3 +21,6 @@ id_ed25519*
 .vibefox/
 logs/
 .DS_Store
+
+# Local Claude Code state (agent worktrees, settings)
+.claude/

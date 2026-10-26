@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { noteWrite } from './writes.ts';
 import path from 'node:path';
 import { bodyPaths, bodyRoot, ensureBodyDirs, type BodyPaths } from './paths.ts';
 
@@ -66,6 +67,8 @@ export interface Mandate {
   revision?: number;
   /** Hash of the mandate this one replaced, so the history is a chain. */
   previousHash?: string;
+  /** 2: the hash covers every nested field (see canonical() in src/wallet/mandate.ts); absent on the first mandates. */
+  hashVersion?: 2;
   /** sha256 of the canonical mandate body, signed with the agent's own ed25519 key. */
   hash?: string;
   agentSignature?: string;
@@ -188,7 +191,22 @@ function readJson<T>(file: string): T | undefined {
 }
 
 function writeJson(file: string, value: unknown, mode?: number): void {
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', mode ? { mode } : undefined);
+  const content = JSON.stringify(value, null, 2) + '\n';
+  fs.writeFileSync(file, content, mode ? { mode } : undefined);
+  noteWrite(file, content);
+}
+
+/** The identity without what only the parent should see (registrant address, Link account details): for models and workers. */
+export function shareableIdentity(id: AgentIdentity): AgentIdentity {
+  const identities = Object.fromEntries(
+    Object.entries(id.identities).map(([k, r]) => {
+      if (!r.details || !('userInfo' in r.details)) return [k, r];
+      const { userInfo: _u, ...details } = r.details;
+      return [k, { ...r, details }];
+    }),
+  );
+  const { legal, ...parent } = id.parent;
+  return { ...id, parent: legal ? { ...parent, legalOnFile: true } as ParentInfo : parent, identities };
 }
 
 function deepMerge<T>(base: T, over: unknown): T {

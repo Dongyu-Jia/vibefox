@@ -57,6 +57,10 @@ describe('mandate: authorized once, enforced every time', () => {
     assert.ok(mandateIntact(m));
     assert.ok(verify(body, m.hash!, m.agentSignature!));
     assert.equal(mandateIntact({ ...m, monthlyLimitCents: 999999 }), false);
+    assert.equal(m.hashVersion, 2);
+    assert.equal(mandateIntact({ ...m, rules: { ...m.rules, discloseAI: false } }), false, 'v2 covers nested rules');
+    const { hashVersion: _v, ...downgraded } = m;
+    assert.equal(mandateIntact(downgraded as typeof m), false, 'dropping hashVersion does not downgrade the check');
     assert.equal(verify(body, 'other', sign(body, 'data')), false);
   });
 });
@@ -197,6 +201,8 @@ describe('identities', () => {
     assert.equal(extractCode('Your verification code is 482913.'), '482913');
     assert.equal(extractCode('【某服务】验证码 7712，5 分钟内有效'), '7712');
     assert.equal(extractCode('Meet at 1530 tomorrow'), undefined);
+    assert.equal(extractCode('G-482913 is your Google verification code.'), '482913');
+    assert.equal(extractCode('Order number FB-1001 confirmed'), undefined);
     const ts = String(Math.floor(Date.now() / 1000));
     const body = '{"event":"agent.message"}';
     const sig = 'sha256=' + crypto.createHmac('sha256', 'whsec_test').update(`${ts}.${body}`).digest('hex');

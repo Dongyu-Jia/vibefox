@@ -67,9 +67,28 @@ export function fmtCents(cents: number, currency = 'usd'): string {
   return `${sym}${(cents / 100).toFixed(2)}`;
 }
 
+/**
+ * v2 (every mandate signed from now on) sorts keys at every depth, so the nested
+ * rules are covered too. v1 passed the top-level key list as a replacer, which
+ * silently dropped nested keys; old v1 mandates still verify the old way.
+ */
 function canonical(m: Mandate): string {
   const { hash: _h, agentSignature: _s, ...rest } = m;
+  if (m.hashVersion === 2) return stable(rest);
   return JSON.stringify(rest, Object.keys(rest).sort());
+}
+
+function stable(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stable(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
 }
 
 export function createMandate(body: Body, input: {
@@ -98,6 +117,7 @@ export function createMandate(body: Body, input: {
   // Only set when given: a mandate without these keys hashes exactly like the ones signed before revisions existed.
   if (input.revision != null) m.revision = input.revision;
   if (input.previousHash) m.previousHash = input.previousHash;
+  m.hashVersion = 2;
   m.hash = crypto.createHash('sha256').update(canonical(m)).digest('hex');
   m.agentSignature = sign(body, m.hash);
   return m;

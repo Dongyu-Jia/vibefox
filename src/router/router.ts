@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Body, WorkerSpec } from '../core/body.ts';
+import { shareableIdentity } from '../core/body.ts';
 import { logEvent } from '../core/log.ts';
 import { PRINCIPLES, ROUTER_ROLE } from '../core/principles.ts';
 import type { InboxItem, Question, Store, Task } from '../core/store.ts';
@@ -425,7 +426,7 @@ Always include "confidence" 0..1. Return only JSON.`),
               question,
               task: { title: task.title, description: task.description, supplements: this.d.store.allSupplements(task.id) },
               memory: this.d.body.memory().slice(-4000),
-              identity: this.d.body.identity(),
+              identity: shareableIdentity(this.d.body.identity()),
             }),
           },
         ],

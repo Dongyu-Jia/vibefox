@@ -89,6 +89,15 @@ export class TelegramChannel implements Channel {
     return { handle: '@' + (me.username ?? me.first_name), displayName: me.first_name, id: String(me.id) };
   }
 
+  /** A bot token given after boot (from the control plane) replaces the placeholder. */
+  setToken(token: string): void {
+    this.token = token;
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
   async start(handler: (msg: InboundMessage) => Promise<void>): Promise<void> {
     if (this.running) return;
     this.running = true;

@@ -31,12 +31,12 @@ vibefox 造的是一个**独立的 AI agent 个体**，不是 personal agent。
 npm install
 npx playwright install chromium
 ./bin/vf keys          # 把 key 存进本地的 .env.local（或者 cp .env.example .env.local 手填）
-./bin/vf init          # 出生
-./bin/vf start         # 醒来（装了 launchd 就由 launchd 托管）
+./bin/vf init          # 在浏览器里出生：名字、它自己的邮箱、它自己的号码，三步
+./bin/vf ui            # 控制台：大脑、Telegram、零花钱和钱包、worker、各种资源
 export PATH="$PWD/bin:$PATH"   # 之后直接用 vf
 ```
 
-然后在 Telegram 里打开向导给你的 `https://t.me/<bot>?start=<口令>` 认领它，直接用一句话布置任务。
+出生完它就常驻了（launchd）。在控制台里给它大脑和 Telegram 之后，在 Telegram 认领它，直接用一句话布置任务。终端版的向导还在：`vf init --cli`。
 
 常用命令：`vf status`、`vf tasks`、`vf identity`、`vf routing`、`vf logs api`、`vf install` / `vf uninstall`。
 

@@ -166,6 +166,9 @@ export function verifyAgentPhoneSignature(rawBody: string, signature: string | u
 /** Pull a one-time code out of an SMS or email. */
 export function extractCode(text: string): string | undefined {
   if (!/(code|verif|otp|passcode|pin|验证码|校验码|动态码|确认码)/i.test(text)) return undefined;
+  // Google and a few others prefix the digits: "G-482913 is your Google verification code."
+  const prefixed = /(?<![\w-])[A-Z]{1,3}-(\d{4,8})(?![\d-])/.exec(text);
+  if (prefixed) return prefixed[1];
   const m = /(?<![\d-])(\d{4,8})(?![\d-])/.exec(text);
   return m?.[1];
 }

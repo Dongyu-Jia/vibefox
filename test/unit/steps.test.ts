@@ -309,7 +309,7 @@ describe('keys the parent hands over: brain, Telegram, email, phone', () => {
     await Promise.all([llm.stop(), tg.stop(), mail.stop(), phone.stop()]);
   });
 
-  it('connectBrain stores the key, tests both tiers and puts the router and voice on the cheap model', async () => {
+  it('connectBrain tests the key before storing it, tests both tiers and puts the router and voice on the cheap model', async () => {
     const secrets = openSecrets(body.slug, body.paths.secretsFile);
     const cheap = 'openrouter:deepseek/deepseek-v4.1-flash';
     const mid = 'openrouter:anthropic/claude-sonnet-5.5';
@@ -340,7 +340,9 @@ describe('keys the parent hands over: brain, Telegram, email, phone', () => {
     const bad = await connectBrain(body, secrets, { provider: 'openrouter', key: 'sk-or-v1-wrong' });
     assert.equal(bad.ok, false);
     assert.equal(bad.routerModel, cheap, 'a broken key never moves the router');
-    assert.equal(body.identity().identities.brain_openrouter.status, 'failed');
+    assert.equal(secrets.get('openrouter_api_key'), llm.key, 'a broken key never replaces a working one');
+    assert.equal(body.identity().identities.brain_openrouter.status, 'open');
+    assert.match(bad.detail, /还在用原来的/);
     await assert.rejects(connectBrain(body, secrets, { provider: 'nope' as never, key: 'k' }), StepError);
     await assert.rejects(connectBrain(body, secrets, { provider: 'deepseek', key: ' ' }), StepError);
   });

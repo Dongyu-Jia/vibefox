@@ -1,6 +1,7 @@
 import type { Body } from '../core/body.ts';
 import { PRINCIPLES, WORKER_ROLE } from '../core/principles.ts';
 import type { Store, Task } from '../core/store.ts';
+import type { Resource } from '../resources/store.ts';
 import { fmtCents } from '../wallet/mandate.ts';
 
 export const TOOLS_REFERENCE = `## Your tools (same for every worker)
@@ -22,6 +23,14 @@ Browser (your own Chromium profile, shared by all workers):
   vf browser wait 'text' [--seconds 15]     page renders late? wait for the text, then it re-snapshots
   vf browser press <Key> | back | screenshot [file]
   (Read pages from the snapshot text; screenshots are for showing the parent.)
+
+Your resources (read-only for you; only the parent changes or removes them, in the control plane):
+  vf resources                              what you have: accounts, tokens, cloud projects… (origin, access, status)
+  vf resource get <id> [field]              a credential when a task needs it (audited); prefer the env var if one is set
+  vf resource otp <id>                      the current two-step code for an account with a two-step key
+  vf resource add <kind> --label "…" --handle "…" --parent <id>   record something you created yourself (a repo, a project…)
+  vf resource request <kind> --why "…"      ask the parent for a root only a human can give (signup, money, legal identity)
+  vf parent legal                           the parent's registrant details (only where a registration requires them)
 
 Your identities:
   vf mail send --to a@b.com --subject "…" --text "…"     email from your own address
@@ -47,13 +56,24 @@ export function identitySummary(body: Body): string {
   return lines.join('\n');
 }
 
-export function workerSystemPrompt(body: Body): string {
+function resourcesSummary(resources: Resource[]): string {
+  if (!resources.length) return 'None yet. If a task needs an account or a token you do not have, use vf resource request.';
+  return resources
+    .slice(0, 40)
+    .map((r) => `- ${r.id}: ${r.label}${r.handle ? ` (${r.handle})` : ''} · ${r.origin === 'self' ? 'you made it' : 'given by the parent'} · access ${r.access} · ${r.status}${r.method === 'browser' ? ' · already signed in in your browser' : ''}`)
+    .join('\n');
+}
+
+export function workerSystemPrompt(body: Body, resources: Resource[] = []): string {
   return `${PRINCIPLES}
 
 ${WORKER_ROLE}
 
 ## Who you are
 ${identitySummary(body)}
+
+## Your resources
+${resourcesSummary(resources)}
 
 ## Personality (SOUL.md)
 ${body.soul().slice(0, 1500)}

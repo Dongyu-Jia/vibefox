@@ -143,13 +143,21 @@ export async function connectBrain(body: Body, secrets: SecretStore, input: { pr
   if (!BRAIN_PROVIDERS.includes(provider)) throw new StepError(`不认识的模型供应商：${String(provider)}`);
   const key = required(input.key, ` ${provider} API key`);
   const cfg = body.config();
-  secrets.set(`${provider}_api_key`, key);
+  const name = `${provider}_api_key`;
+  const previous = secrets.get(name);
+  // Test the new key before it replaces anything: a typo must not knock out a working brain.
+  const trial: SecretStore = { kind: secrets.kind, get: (n) => (n === name ? key : secrets.get(n)), set: (n, v) => secrets.set(n, v), delete: (n) => secrets.delete(n) };
   const cand = TIER_CANDIDATES[provider];
   const specs = [...new Set([cand.mid, cand.cheap])];
-  const tested = await Promise.all(specs.map((spec) => testModel(spec, cfg, secrets)));
+  const tested = await Promise.all(specs.map((spec) => testModel(spec, cfg, trial)));
   const results: Record<string, { ok: boolean; detail: string }> = {};
   specs.forEach((spec, i) => (results[spec] = tested[i]));
   const anyOk = tested.some((r) => r.ok);
+  if (!anyOk && previous && previous !== key) {
+    const why = specs.map((spec) => `✘ ${spec}：${results[spec].detail}`).join('；');
+    return { ok: false, detail: `新 key 没通过，还在用原来的（…${previous.slice(-4)}）。${why}`, routerModel: cfg.router.model, routerChanged: false, models: results };
+  }
+  secrets.set(name, key);
   body.setIdentityRecord(`brain_${provider}`, {
     status: anyOk ? 'open' : 'failed',
     value: `${provider} key …${key.slice(-4)}`,

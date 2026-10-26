@@ -30,7 +30,9 @@ export function parseArgs(argv: string[]): Parsed {
 const HELP = `vf — vibefox, an independent AI agent individual
 
   vf keys [--only openrouter,telegram] [--check]   type keys once (hidden), checked live, kept in .env.local (gitignored)
-  vf init [--step birth|brain|workers|channel|email|phone|money|parent|install] [--answers file.json]
+  vf init                        birth in the browser: a name, its own email, its own number — the rest comes later in vf ui
+  vf init --cli [--step birth|brain|workers|channel|email|phone|money|parent|install] [--answers file.json]   the terminal wizard
+  vf ui [resources/add/github]   the control plane in your browser: resources, wallet, Telegram, brain, workers
   vf start [--foreground]        wake the agent (launchd if installed, else foreground)
   vf stop | vf install | vf uninstall | vf status | vf agents | vf use <name>
   vf tasks | vf task <id> | vf logs [api|events] [--n 20] [--service telegram]
@@ -45,6 +47,9 @@ worker tools (inside a task; same as the MCP tools):
   vf call --to +1… --purpose "…"
   vf pay --merchant-name X --merchant-url U --amount <cents> --context "…" [--test]
   vf remember "fact" | vf journal "note"
+  vf resources [--catalog] | vf resource get <id> [field] | vf resource otp <id>
+  vf resource add <kind> --label "…" [--handle h] [--parent id] [--note n] | vf resource request <kind> --why "…"
+  vf parent legal
 `;
 
 async function tool(name: string, args: Record<string, unknown>): Promise<void> {
@@ -66,7 +71,21 @@ export async function main(argv: string[]): Promise<void> {
       process.stdout.write(HELP);
       return;
 
+    case 'ui': {
+      const { openControlPlane } = await import('./ui.ts');
+      await openControlPlane(rest[0]);
+      return;
+    }
+
     case 'init': {
+      if (!flags.cli && !flags.step && !flags.answers) {
+        const { runSetupInBrowser, openControlPlane } = await import('./ui.ts');
+        const slug = currentAgentSlug();
+        const ids = slug && fs.existsSync(path.join(agentsDir(), slug, 'identity.json')) ? Body.open(slug).identity().identities : undefined;
+        // Already born (it has its own email and number): the rest happens in the control plane.
+        if (ids?.email?.status === 'open' && ids.phone?.status === 'open' && !flags.new) return openControlPlane();
+        return runSetupInBrowser();
+      }
       const { runWizard, STEPS } = await import('../onboarding/wizard.ts');
       const { TerminalPrompter, ScriptedPrompter } = await import('../onboarding/prompter.ts');
       const answers = flags.answers ? JSON.parse(fs.readFileSync(String(flags.answers), 'utf8')) as Record<string, unknown> : undefined;
@@ -232,6 +251,25 @@ export async function main(argv: string[]): Promise<void> {
       return tool('progress', { text: rest.join(' ') || flags.text });
     case 'report':
       return tool('report', { status: flags.status ?? 'done', summary: flags.summary ?? rest.join(' ') });
+    case 'resources': {
+      if (flags.catalog) {
+        const { RESOURCE_KINDS } = await import('../resources/catalog.ts');
+        for (const k of RESOURCE_KINDS) console.log(`${k.id.padEnd(14)} ${k.label.padEnd(16)} ${k.human ? `需要人：${k.human}` : '它自己能开'}  ${k.unlocks.slice(0, 2).join('；')}`);
+        return;
+      }
+      return tool('resources', {});
+    }
+    case 'resource': {
+      const [action, a1, a2] = rest;
+      if (action === 'get') return tool('resource_get', { id: a1, field: a2 ?? flags.field });
+      if (action === 'otp') return tool('resource_otp', { id: a1 });
+      if (action === 'add') return tool('resource_add', { kind: a1, label: flags.label ?? a1, handle: flags.handle, parent: flags.parent, note: flags.note });
+      if (action === 'request') return tool('resource_request', { kind: a1, why: flags.why ?? rest.slice(2).join(' ') });
+      throw new Error('vf resource get|otp|add|request …  (resources are read-only for workers; the parent changes them in vf ui)');
+    }
+    case 'parent':
+      if (rest[0] === 'legal') return tool('parent_legal', {});
+      throw new Error('vf parent legal');
     case 'remember':
       return tool('remember', { fact: rest.join(' ') });
     case 'journal':
