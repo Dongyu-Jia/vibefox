@@ -41,11 +41,28 @@ function rawStatus(base: string, p: string, headers: Record<string, string>, met
   });
 }
 
-async function controlSession(d: RunningDaemon): Promise<string> {
+/** What `vf ui` does: get a code (a person clicked yes), hold the session open, trade the code for the token. */
+async function controlSession(d: RunningDaemon): Promise<{ token: string; code: string; end: () => Promise<void> }> {
   const { json: c } = await call(d.url, '/v1/control/login-code', { method: 'POST', token: d.token });
+  const abort = new AbortController();
+  const held = fetch(`${d.url}/v1/control/hold`, { method: 'POST', headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ code: c.code }), signal: abort.signal })
+    .then(async (r) => {
+      assert.equal(r.status, 200);
+      for await (const _ of r.body!) {}
+    })
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, 100));
   const { status, json } = await call(d.url, '/v1/control/session', { body: { code: c.code } });
   assert.equal(status, 200);
-  return json.token as string;
+  return {
+    token: json.token as string,
+    code: c.code,
+    end: async () => {
+      abort.abort();
+      await held;
+      await new Promise((r) => setTimeout(r, 100));
+    },
+  };
 }
 
 /** A pretend GitHub that knows one full-power token. */
@@ -65,6 +82,7 @@ describe('the control plane: the parent’s local UI', () => {
   let w: World;
   let gh: Awaited<ReturnType<typeof fakeGithub>>;
   let token: string;
+  let session: Awaited<ReturnType<typeof controlSession>>;
   const saved = { gh: process.env.VF_API_GITHUB, headless: process.env.VF_PARENT_BROWSER_HEADLESS };
   before(async () => {
     gh = await fakeGithub();
@@ -73,9 +91,11 @@ describe('the control plane: the parent’s local UI', () => {
     w = await createWorld();
     await w.start();
     await w.bind();
-    token = await controlSession(w.daemon!);
+    session = await controlSession(w.daemon!);
+    token = session.token;
   });
   after(async () => {
+    await session?.end();
     await w?.close();
     await gh?.close();
     for (const [k, v] of [['VF_API_GITHUB', saved.gh], ['VF_PARENT_BROWSER_HEADLESS', saved.headless]] as const) {
@@ -101,10 +121,17 @@ describe('the control plane: the parent’s local UI', () => {
     assert.equal(await rawStatus(w.daemon!.url, '/v1/health', { host: new URL(w.daemon!.url).host, origin: 'https://evil.example' }), 403, 'cross-origin');
     assert.equal(await rawStatus(w.daemon!.url, '/v1/control/overview', { host: new URL(w.daemon!.url).host }, 'OPTIONS'), 405);
     assert.equal((await call(w.daemon!.url, '/v1/control/overview', { token: w.daemon!.token })).status, 401, 'the worker token cannot open the control plane');
-    const { json: c } = await call(w.daemon!.url, '/v1/control/login-code', { method: 'POST', token: w.daemon!.token });
-    assert.equal((await call(w.daemon!.url, '/v1/control/session', { body: { code: c.code } })).status, 200);
-    assert.equal((await call(w.daemon!.url, '/v1/control/session', { body: { code: c.code } })).status, 401, 'a code works once');
+    // While `vf ui` holds the session its link opens again and again — same session — and quitting ends it.
+    const other = await controlSession(w.daemon!);
+    const again = await call(w.daemon!.url, '/v1/control/session', { body: { code: other.code } });
+    assert.equal(again.json.token, other.token, 'the same link opens the same session again (new tab, reload)');
+    assert.equal((await call(w.daemon!.url, '/v1/control/overview', { token: other.token })).status, 200);
+    await other.end();
+    assert.equal((await call(w.daemon!.url, '/v1/control/overview', { token: other.token })).status, 401, 'Ctrl-C on vf ui ends the session at once');
+    assert.equal((await call(w.daemon!.url, '/v1/control/session', { body: { code: other.code } })).status, 401, 'and its link stops working');
+    assert.equal((await call(w.daemon!.url, '/v1/control/overview', { token })).status, 200, 'other sessions are untouched');
     assert.equal((await call(w.daemon!.url, '/v1/control/login-code', { method: 'POST' })).status, 401);
+    assert.equal((await call(w.daemon!.url, '/v1/control/hold', { token: w.daemon!.token, body: { code: 'nope' } })).status, 410);
     await w.waitBot((m) => m.text.includes('打开了我的控制台'));
     // The daemon token is in every worker's env: on its own it must not open the control plane.
     process.env.VF_CONTROL_CONFIRM = 'deny';
@@ -314,6 +341,7 @@ describe('the control plane: the parent’s local UI', () => {
       assert.equal((await call(setup.url, '/v1/setup/state')).status, 401);
       const { json: s } = await call(setup.url, '/v1/setup/session', { body: { code: setup.code } });
       const t = s.token as string;
+      assert.equal((await call(setup.url, '/v1/setup/session', { body: { code: setup.code } })).json.token, t, 'the birth link works again while vf init runs');
       assert.equal((await call(setup.url, '/v1/setup/finish', { token: t, body: {} })).status, 409, 'nothing to finish yet');
       const born = await call(setup.url, '/v1/setup/birth', { token: t, body: { name: 'Pip', parentName: 'Test Parent' } });
       assert.equal(born.json.agent.name, 'Pip');

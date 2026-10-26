@@ -437,12 +437,31 @@ export function createControl(d: ControlDeps): (req: http.IncomingMessage, res: 
         sendJson(res, 200, { code: d.sessions.issueCode() });
         return true;
       }
+      if (p === '/v1/control/hold' && method === 'POST') {
+        // `vf ui` keeps this request open; the session lives exactly as long as it does.
+        if (!sameToken(bearer(req), d.daemonToken)) throw new HttpError(401, 'unauthorized');
+        const code = str(body.code, 'code', 200);
+        const until = d.sessions.hold(code);
+        if (until === undefined) throw new HttpError(410, '这个控制台会话已经结束了');
+        logEvent('control.session.held', {});
+        notify('🖥 这台 Mac 上打开了我的控制台。不是你的话，发 /freeze。');
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+        res.flushHeaders();
+        const beat = setInterval(() => res.write('.'), 15_000);
+        const end = setTimeout(() => res.end('expired\n'), Math.max(0, until - Date.now()));
+        res.on('close', () => {
+          clearInterval(beat);
+          clearTimeout(end);
+          d.sessions.revoke(code);
+          logEvent('control.session.ended', {});
+        });
+        return true;
+      }
       if (p === '/v1/control/session' && method === 'POST') {
         const token = d.sessions.exchange(str(body.code, 'code', 200));
-        if (!token) throw new HttpError(401, '这个链接用过了或过期了，在 Mac 上重新运行 vf ui');
+        if (!token) throw new HttpError(401, '控制台的会话结束了：在这台 Mac 上运行 vf ui');
         const id = d.body.identity();
         logEvent('control.session', {});
-        notify('🖥 这台 Mac 上打开了我的控制台。不是你的话，发 /freeze。');
         sendJson(res, 200, { token, agent: { name: id.name, slug: id.slug } });
         return true;
       }

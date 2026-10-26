@@ -31,8 +31,9 @@ export interface SetupOptions {
 }
 
 export async function startSetupServer(opts: SetupOptions): Promise<SetupServer> {
-  const sessions = new Sessions({ codeTtlMs: 30 * 60_000 });
-  const code = sessions.issueCode();
+  const sessions = new Sessions();
+  // This server is the holder: its link works, again and again, until `vf init` ends.
+  const code = sessions.issueCode({ held: true });
   let body: Body | undefined = currentAgentSlug() ? safeOpen(currentAgentSlug()!) : undefined;
   // An existing agent that already has both identities is not "being born": that is what `vf ui` is for.
   if (body && body.identity().identities.email?.status === 'open' && body.identity().identities.phone?.status === 'open') body = undefined;
@@ -119,7 +120,7 @@ export async function startSetupServer(opts: SetupOptions): Promise<SetupServer>
       const b = await readJson(req);
       if (p === '/v1/setup/session' && req.method === 'POST') {
         const token = sessions.exchange(typeof b.code === 'string' ? b.code : '');
-        if (!token) throw new HttpError(401, '这个链接用过了或过期了，重新运行 vf init');
+        if (!token) throw new HttpError(401, '出生向导已经结束了：重新运行 vf init');
         return sendJson(res, 200, { token });
       }
       if (!sessions.check(bearer(req))) throw new HttpError(401, 'unauthorized');

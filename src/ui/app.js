@@ -480,7 +480,7 @@ async function boot() {
   if (hp?.get('code')) {
     const code = hp.get('code');
     const to = hp.get('to');
-    // Drop the one-time code from the address bar and history before anything else.
+    // Keep the code out of the address bar; the link in the terminal stays usable while vf ui runs.
     cleanHash(S.mode === 'setup' ? '/setup' : to && /^\/[\w/:%.-]*$/.test(to) ? to : '/home');
     try {
       const r = await api(`/v1/${S.mode}/session`, { body: { code }, auth: false });
@@ -529,11 +529,11 @@ function renderExpired(err) {
         'div',
         { class: 'card solo-card' },
         brandMark(),
-        h('h1', { text: setup ? '这个出生向导的链接用过了' : '这个控制台页面过期了' }),
-        h('p', { class: 'lead', text: '为了安全，每个链接只能打开一次，会话 12 小时后过期。在这台 Mac 的终端里再运行一次：' }),
+        h('h1', { text: setup ? '出生向导已经结束了' : '控制台的会话结束了' }),
+        h('p', { class: 'lead', text: setup ? '运行 vf init 的那个终端关掉了，或者出生已经完成。需要的话再运行：' : '运行 vf ui 的那个终端退出了（或者已经开了 12 小时）。在这台 Mac 的终端里再运行：' }),
         cmdLine(setup ? 'vf init' : 'vf ui'),
         err ? h('p', { class: 'form-error', text: err.message }) : null,
-        h('p', { class: 'muted small', text: '它会在浏览器里打开一个新的链接。' }),
+        h('p', { class: 'muted small', text: '命令开着的时候，它给的链接可以反复打开；用完在终端按 Ctrl-C 就结束会话。' }),
       ),
     ),
   );

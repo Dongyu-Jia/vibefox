@@ -44,7 +44,7 @@ worker 和 daemon 是同一个 macOS 用户，理论上能在 shell 里直接删
 
 - **控制台**由 daemon 提供：`GET /ui/*`（静态文件）和 `/v1/control/*`（JSON）。
 - **出生向导**由 `vf init` 起的临时 setup 服务器提供（随机端口）：同一份 UI + `/v1/setup/*`。出生完成后它装好 launchd、等 daemon 起来、把浏览器交给 daemon 的控制台，然后退出。
-- **家长会话**：`vf ui` 用 daemon token 换一个一次性码（120 秒），打开 `…/ui/#code=<码>`；页面用码换一个只存在 daemon 内存里的会话 token（12 小时），放 `sessionStorage`，用 `Authorization: Bearer` 发。**worker 的 daemon token 访问不了 `/v1/control/*`。** `vf ui` 在 worker 里（有 `VF_RUN_ID` 或 `.vf-run.json`）拒绝运行。每开一个会话都会在 Telegram 告诉你。
+- **家长会话**：`vf ui` 先在这台 Mac 上弹一个对话框，你点「打开控制台」（worker 的 shell 点不了；daemon token 在每个 worker 的环境里，光有它不够）。然后它拿到一个码、和 daemon 保持一条连接，打开 `…/ui/#code=<码>`。**`vf ui` 开着的时候，这个链接可以反复打开**（新标签页、刷新），都是同一个会话；**按 Ctrl-C 或者杀掉 `vf ui`，会话立刻结束**，链接作废；最长 12 小时。会话 token 只在 daemon 内存里，页面放在 `sessionStorage`，用 `Authorization: Bearer` 发。**worker 的 daemon token 访问不了 `/v1/control/*`。** `vf ui` 在 worker 里（有 `VF_RUN_ID` 或 `.vf-run.json`）拒绝运行。每开一个会话都会在 Telegram 告诉你。`vf init` 也一样：出生向导的链接在它运行期间可以反复打开，出生完它直接接着持有控制台的会话。
 - **所有请求**：`Host` 必须是 `127.0.0.1:<端口>` 或 `localhost:<端口>`（防 DNS rebinding）；带 `Origin` 时必须同源；`OPTIONS` 一律 405；请求体上限 1 MB；token 用常量时间比较。
 - **静态页**：`Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`，`X-Frame-Options: DENY`，`X-Content-Type-Options: nosniff`，`Referrer-Policy: no-referrer`，`Cache-Control: no-store`。页面里从不放 token；收到的不可信文字（邮件标题、短信）一律 `textContent`。
 - agent 自己的浏览器打不开 daemon 自己的端口（防止被网页注入的 worker 操作控制台）。
@@ -144,7 +144,8 @@ recentCodes(sinceIso: string): Promise<{ at: string; channel: 'email' | 'sms'; f
 
 ```
 GET  /v1/whoami                         → { mode: 'setup' | 'control', agent?: { name, slug } }   (无需鉴权)
-POST /v1/control/login-code             → { code }            (daemon token；给 vf ui 用)
+POST /v1/control/login-code             → { code }            (daemon token + 你在对话框里点了允许；给 vf ui 用)
+POST /v1/control/hold { code }          → 一直不结束的响应        (daemon token；vf ui 拿着它，连接断了会话就结束)
 POST /v1/control/session  { code }      → { token, agent: { name, slug } }
 
 GET  /v1/control/overview               → { agent: { name, slug, bornAt, parentName }, ready: { brain, channel, canWork }, steps: Step[], money: { mandate?, spentThisMonthCents, frozen, wallet: 'open'|'needs-parent'|'none' }, counts: { resources, activeTasks }, recentTasks: { id, title, status }[] }

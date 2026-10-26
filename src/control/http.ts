@@ -115,43 +115,76 @@ export function serveUi(req: http.IncomingMessage, res: http.ServerResponse, pat
 
 // ---------- parent sessions ----------
 
+interface Session {
+  token: string;
+  /** Hard end (12 h). */
+  until: number;
+  /** Someone (`vf ui`, `vf init`) is holding it open; otherwise it dies at `graceUntil`. */
+  held: boolean;
+  graceUntil: number;
+}
+
 /**
- * One-time codes (from `vf ui`, which proves it runs as the parent's CLI) are
- * exchanged by the page for a session token that only lives in this process.
+ * A session lives exactly as long as the parent's `vf ui` (or `vf init`) keeps
+ * it: its link can be opened again and again — new tabs, reloads — and every
+ * page gets the same session; quitting `vf ui` ends it at once. A code nobody
+ * holds dies after a short grace period; nothing lives past 12 hours.
  */
 export class Sessions {
-  private codes = new Map<string, number>();
-  private tokens = new Map<string, number>();
-  private codeTtlMs: number;
+  private byCode = new Map<string, Session>();
+  private graceMs: number;
   private sessionTtlMs: number;
 
-  constructor(opts: { codeTtlMs?: number; sessionTtlMs?: number } = {}) {
-    this.codeTtlMs = opts.codeTtlMs ?? 120_000;
+  constructor(opts: { graceMs?: number; sessionTtlMs?: number } = {}) {
+    this.graceMs = opts.graceMs ?? 60_000;
     this.sessionTtlMs = opts.sessionTtlMs ?? 12 * 3600_000;
   }
 
-  issueCode(): string {
+  /** `held: true` for a server that is itself the holder (the setup server behind `vf init`). */
+  issueCode(opts: { held?: boolean } = {}): string {
     const code = crypto.randomBytes(18).toString('base64url');
-    this.codes.set(code, Date.now() + this.codeTtlMs);
+    const now = Date.now();
+    this.byCode.set(code, { token: crypto.randomBytes(32).toString('base64url'), until: now + this.sessionTtlMs, held: Boolean(opts.held), graceUntil: now + this.graceMs });
     return code;
   }
 
+  /** The session token for a live code — the same one every time. */
   exchange(code: string): string | undefined {
-    const until = this.codes.get(code);
-    this.codes.delete(code);
-    if (!until || until < Date.now()) return undefined;
-    const token = crypto.randomBytes(32).toString('base64url');
-    this.tokens.set(token, Date.now() + this.sessionTtlMs);
-    return token;
+    return this.live(code)?.token;
+  }
+
+  /** Marks the code held; returns the time it ends anyway, or undefined for an unknown or dead code. */
+  hold(code: string): number | undefined {
+    const s = this.live(code);
+    if (!s) return undefined;
+    s.held = true;
+    return s.until;
+  }
+
+  revoke(code: string): void {
+    this.byCode.delete(code);
   }
 
   check(token: string | undefined): boolean {
     if (!token) return false;
-    for (const [t, until] of this.tokens) {
-      if (until < Date.now()) this.tokens.delete(t);
-      else if (sameToken(token, t)) return true;
+    for (const [code, s] of this.byCode) {
+      if (!this.alive(s)) this.byCode.delete(code);
+      else if (sameToken(token, s.token)) return true;
     }
     return false;
+  }
+
+  private live(code: string): Session | undefined {
+    const s = this.byCode.get(code);
+    if (!s) return undefined;
+    if (this.alive(s)) return s;
+    this.byCode.delete(code);
+    return undefined;
+  }
+
+  private alive(s: Session): boolean {
+    const now = Date.now();
+    return now < s.until && (s.held || now < s.graceUntil);
   }
 }
 

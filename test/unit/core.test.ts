@@ -19,6 +19,7 @@ import { formatSnapshot } from '../../src/browser/service.ts';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { decodeKeychainValue, encodeKeychainValue, KeyFileStore } from '../../src/core/secrets.ts';
+import { Sessions } from '../../src/control/http.ts';
 import { PROJECT_ROOT } from '../../src/core/paths.ts';
 
 const mandate: Mandate = {
@@ -107,6 +108,30 @@ describe('audit log redaction', () => {
     assert.equal(redactString('card 4242424242424242 ok'), 'card •••• 4242 ok');
     assert.equal(redactString('ts 1729771234567 phone +14155550100'), 'ts 1729771234567 phone +14155550100');
     assert.deepEqual(redact({ authorization: 'Bearer x', card: { number: '4000009990001984', cvc: '100' }, key: 'k' }), { authorization: '[REDACTED]', card: { number: '•••• 1984', cvc: '[REDACTED]' }, key: '[REDACTED]' });
+  });
+});
+
+describe('control-plane sessions', () => {
+  it('live while held, reusable, ended by revoke; an unheld code dies after its grace', async () => {
+    const s = new Sessions({ graceMs: 30, sessionTtlMs: 10_000 });
+    const held = s.issueCode();
+    const t = s.exchange(held)!;
+    assert.equal(s.exchange(held), t, 'the same link gives the same session');
+    assert.ok(s.hold(held));
+    const loose = s.issueCode();
+    const lt = s.exchange(loose)!;
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(s.check(t), 'held: alive past the grace');
+    assert.equal(s.check(lt), false, 'nobody held it: gone');
+    assert.equal(s.exchange(loose), undefined);
+    s.revoke(held);
+    assert.equal(s.check(t), false);
+    assert.equal(s.hold(held), undefined);
+    const short = new Sessions({ sessionTtlMs: 20 });
+    const c = short.issueCode({ held: true });
+    const st = short.exchange(c)!;
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(short.check(st), false, 'nothing lives past its hard end');
   });
 });
 
